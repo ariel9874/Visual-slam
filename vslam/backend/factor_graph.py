@@ -99,7 +99,11 @@ class FactorGraphBackend(ABC):
 
 
 class GTSAMBackend(FactorGraphBackend):
-    """Adaptador GTSAM — TODO(v0.3).
+    """Adaptador GTSAM — TODO(v0.35).
+
+    Nota de plataforma: PyPI no publica wheels de gtsam para Windows
+    (verificado en este repo); en Windows usa la referencia NumPy
+    (pose_graph.GaussNewtonPoseGraph) o instala GTSAM vía conda-forge/WSL.
 
     Boceto de la implementación prevista (se deja como guía):
         import gtsam

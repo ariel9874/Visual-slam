@@ -61,6 +61,9 @@ python scripts/benchmark_frontends.py     # tabla: matches, inliers, FPS y ATE p
 # 6) El salto a SLAM de verdad: tracking 3D-2D (PnP) contra un mapa disperso (v0.2)
 python examples/02_pnp_tracking.py --images data/synthetic/images --calib data/synthetic/calib.txt --output output/pnp --gt data/synthetic/groundtruth.txt
 python scripts/benchmark_frontends.py --trackers essential,pnp --detectors orb,sift   # 2D-2D vs 3D-2D
+
+# 7) El backend: grafo de poses + cierre de bucle (v0.3, no necesita imágenes)
+python examples/03_pose_graph_loop.py --output output/pose_graph
 ```
 
 Los frontends aprendidos (SuperPoint, DISK, LightGlue) son opcionales:
@@ -86,7 +89,8 @@ Cada bloque del ejemplo indica a qué módulo de `vslam/` corresponde en la arqu
 - [x] **v0.1** — Esqueleto: VO monocular 2D-2D, contratos de datos, interfaces de backend/mapper.
 - [x] **v0.1.5** — Frontend configurable: 6 detectores clásicos + adaptadores aprendidos (SuperPoint/DISK/LightGlue), y benchmark con ATE ([scripts/benchmark_frontends.py](scripts/benchmark_frontends.py)).
 - [x] **v0.2** — Triangulación (DLT) + tracking 3D-2D (PnP) contra mapa disperso persistente, con keyframes e inicialización validada por tercera vista ([vslam/frontend/tracker.py](vslam/frontend/tracker.py)). En la secuencia sintética: ATE 0.2 cm con SIFT (vs 4.8 cm del 2D-2D).
-- [ ] **v0.3** — Backend real: grafo de poses con GTSAM, cierre de bucle (bolsa de palabras).
+- [x] **v0.3** — Backend real: álgebra de Lie SE(3) ([vslam/core/lie.py](vslam/core/lie.py)) + optimizador de grafo de poses en NumPy puro (Gauss-Newton/LM con kernel Huber, [vslam/backend/pose_graph.py](vslam/backend/pose_graph.py)) + demo de cierre de bucle con re-anclaje del mapa ([examples/03_pose_graph_loop.py](examples/03_pose_graph_loop.py)): ATE 1.09 m → 0.05 m con un solo factor de bucle.
+- [ ] **v0.35** — Detección visual de cierres de bucle (BoW/relocalización) + BA local integrados al `PnPTracker`; adaptador GTSAM (requiere Linux/conda: no hay wheel de Windows en PyPI).
 - [ ] **v0.4** — Núcleo C++ del frontend (KLT/ORB) con bindings pybind11.
 - [ ] **v0.5** — Mapper de Gaussian Splatting (rasterizador diferenciable) detrás de la interfaz `MapperBase`.
 - [ ] **v0.6** — Nodos ROS 2 (frontend/backend/mapper como lifecycle nodes componibles).

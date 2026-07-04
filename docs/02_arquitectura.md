@@ -40,6 +40,7 @@ Visual-slam/
 │   │   ├── camera.py               #   PinholeCamera: intrínsecos K, proyección
 │   │   ├── frame.py                #   Frame/Keyframe: imagen + características + pose T_w_c
 │   │   ├── geometry.py             #   SE(3), triangulación DLT + filtros, PnP robusto
+│   │   ├── lie.py                  #   Álgebra de Lie: Exp/Log de SO(3) y SE(3) (v0.3)
 │   │   └── trajectory.py           #   Trayectoria + exportación formato TUM (evaluación)
 │   │
 │   ├── frontend/                   # ── CAPA 1: TRACKING RÁPIDO (por frame) ──
@@ -49,8 +50,9 @@ Visual-slam/
 │   │   └── tracker.py              #   TrackerBase + PnPTracker (3D-2D contra mapa, v0.2)
 │   │
 │   ├── backend/                    # ── CAPA 2: OPTIMIZACIÓN (por keyframe) ──
-│   │   └── factor_graph.py         #   FactorGraphBackend: interfaz de grafo de factores
-│   │                               #   + adaptadores GTSAM/g2o (stubs en v0.1)
+│   │   ├── factor_graph.py         #   FactorGraphBackend: interfaz + teoría MAP completa
+│   │   └── pose_graph.py           #   GaussNewtonPoseGraph: referencia NumPy (GN/LM +
+│   │                               #   Huber + gauge) — GTSAM queda como adaptador (v0.35)
 │   │
 │   ├── mapping/                    # ── CAPA 3: MAPEO INTERCAMBIABLE (asíncrono) ──
 │   │   ├── base.py                 #   MapperBase: interfaz común
@@ -71,14 +73,16 @@ Visual-slam/
 │
 ├── examples/                       # Puntos de entrada educativos, numerados
 │   ├── 01_monocular_vo.py          #   VO monocular 2D-2D en un solo archivo comentado
-│   └── 02_pnp_tracking.py          #   Tracking 3D-2D contra mapa disperso (usa el paquete)
+│   ├── 02_pnp_tracking.py          #   Tracking 3D-2D contra mapa disperso (usa el paquete)
+│   └── 03_pose_graph_loop.py       #   Backend: deriva → cierre de bucle → mapa re-anclado
 ├── scripts/
 │   ├── make_synthetic_sequence.py  #   Genera secuencia sintética + ground truth (sin descargas)
 │   └── benchmark_frontends.py      #   Compara detectores/matchers: inliers, FPS, ATE
 └── tests/
     ├── test_pose_recovery.py       #   Verifica convenciones de pose y geometría epipolar
     ├── test_frontends.py           #   Verifica el registro de detectores/matchers
-    └── test_triangulation_pnp.py   #   Verifica DLT, PnP robusto y re-anclaje del mapa
+    ├── test_triangulation_pnp.py   #   Verifica DLT, PnP robusto y re-anclaje del mapa
+    └── test_pose_graph.py          #   Verifica Exp/Log de Lie y el grafo de poses
 ```
 
 ## 3. Flujo de datos
