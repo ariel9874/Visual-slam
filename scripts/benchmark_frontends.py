@@ -46,14 +46,20 @@ def _load_vo_class():
     return module.MonocularVO
 
 
-def run_combo(vo_cls, camera, images_dir, detector: str, matcher: str, max_frames: int):
-    """Corre la VO con un frontend concreto y devuelve métricas crudas."""
+def run_combo(vo_cls, camera, images_dir, detector: str, matcher: str,
+              tracker: str, max_frames: int):
+    """Corre la VO con un frontend/tracker concretos y devuelve métricas crudas."""
     extractor = create_extractor(detector)
     matcher_obj = create_matcher(matcher)
-    vo = vo_cls(camera, extractor=extractor, matcher=matcher_obj)
+    if tracker == "pnp":
+        from vslam.frontend.tracker import PnPTracker
+        vo = PnPTracker(camera, extractor=extractor, matcher=matcher_obj)
+    else:
+        vo = vo_cls(camera, extractor=extractor, matcher=matcher_obj)
 
     trajectory = Trajectory()
     inliers, matches, coasting, elapsed = [], [], 0, 0.0
+    start = 1  # el primer frame solo fija el origen
     for i, (timestamp, gray) in enumerate(ImageSequenceLoader(images_dir)):
         if max_frames and i >= max_frames:
             break
@@ -61,13 +67,16 @@ def run_combo(vo_cls, camera, images_dir, detector: str, matcher: str, max_frame
         T_w_c, info = vo.process_frame(gray)
         elapsed += time.perf_counter() - t0
         trajectory.append(timestamp, T_w_c)
-        if i > 0:  # el primer frame solo fija el origen
+        if info.get("state") == "INIT-OK":
+            start = i      # PnP: evaluar desde que el sistema se inicializó
+        if i > 0:
             inliers.append(info["n_inliers"])
             matches.append(info["n_matches"])
             coasting += 0 if info["tracked"] else 1
     n = len(trajectory)
     return {
         "positions": trajectory.positions,
+        "start": start,
         "frames": n,
         "fps": n / elapsed if elapsed > 0 else float("inf"),
         "mean_matches": sum(matches) / max(len(matches), 1),
@@ -87,6 +96,9 @@ def main() -> int:
                              "saltan limpiamente si faltan dependencias)")
     parser.add_argument("--matchers", default="ratio",
                         help="lista separada por comas")
+    parser.add_argument("--trackers", default="essential",
+                        help="lista separada por comas: essential (2D-2D, ej.01) "
+                             "y/o pnp (3D-2D contra mapa, vslam.frontend.tracker)")
     parser.add_argument("--max-frames", type=int, default=0)
     args = parser.parse_args()
 
@@ -96,28 +108,33 @@ def main() -> int:
         gt = gt[: args.max_frames]
     vo_cls = _load_vo_class()
 
-    header = (f"{'detector':<10} {'matcher':<10} {'matches':>8} {'inliers':>8} "
-              f"{'coast':>6} {'fps':>7} {'ATE cm':>8} {'ATE %':>7}")
+    header = (f"{'tracker':<10} {'detector':<10} {'matcher':<10} {'matches':>8} "
+              f"{'inliers':>8} {'coast':>6} {'fps':>7} {'ATE cm':>8} {'ATE %':>7}")
     print(header)
     print("-" * len(header))
 
-    for detector in args.detectors.split(","):
-        for matcher in args.matchers.split(","):
-            detector, matcher = detector.strip(), matcher.strip()
-            try:
-                r = run_combo(vo_cls, camera, args.images, detector, matcher,
-                              args.max_frames)
-                m = ate(r["positions"], gt[: r["frames"]])
-                print(f"{detector:<10} {matcher:<10} {r['mean_matches']:>8.0f} "
-                      f"{r['mean_inliers']:>8.0f} {r['coasting']:>6d} "
-                      f"{r['fps']:>7.1f} {100 * m['rmse']:>8.1f} "
-                      f"{m['rmse_pct']:>6.1f}%")
-            except ImportError as exc:
-                print(f"{detector:<10} {matcher:<10} SKIP: {str(exc).splitlines()[0]}")
-            except Exception as exc:  # un frontend roto no debe tumbar la tabla
-                print(f"{detector:<10} {matcher:<10} ERROR: {exc}")
+    for tracker in args.trackers.split(","):
+        for detector in args.detectors.split(","):
+            for matcher in args.matchers.split(","):
+                tracker, detector, matcher = (s.strip() for s in
+                                              (tracker, detector, matcher))
+                tag = f"{tracker:<10} {detector:<10} {matcher:<10}"
+                try:
+                    r = run_combo(vo_cls, camera, args.images, detector, matcher,
+                                  tracker, args.max_frames)
+                    s = r["start"]
+                    m = ate(r["positions"][s:], gt[s: r["frames"]])
+                    print(f"{tag} {r['mean_matches']:>8.0f} "
+                          f"{r['mean_inliers']:>8.0f} {r['coasting']:>6d} "
+                          f"{r['fps']:>7.1f} {100 * m['rmse']:>8.1f} "
+                          f"{m['rmse_pct']:>6.1f}%")
+                except ImportError as exc:
+                    print(f"{tag} SKIP: {str(exc).splitlines()[0]}")
+                except Exception as exc:  # un frontend roto no debe tumbar la tabla
+                    print(f"{tag} ERROR: {exc}")
 
-    print("\nATE: RMSE tras alineación de similitud (Umeyama) contra ground truth;")
+    print("\nATE: RMSE tras alineación de similitud (Umeyama) contra ground truth,")
+    print("evaluado desde el primer frame con tracking (pnp: desde INIT-OK);")
     print("'coast' = frames donde el tracking falló y se usó velocidad constante.")
     return 0
 

@@ -39,23 +39,24 @@ Visual-slam/
 │   ├── core/                       # Contratos de datos compartidos por todas las capas
 │   │   ├── camera.py               #   PinholeCamera: intrínsecos K, proyección
 │   │   ├── frame.py                #   Frame/Keyframe: imagen + características + pose T_w_c
+│   │   ├── geometry.py             #   SE(3), triangulación DLT + filtros, PnP robusto
 │   │   └── trajectory.py           #   Trayectoria + exportación formato TUM (evaluación)
 │   │
 │   ├── frontend/                   # ── CAPA 1: TRACKING RÁPIDO (por frame) ──
 │   │   ├── features.py             #   Registro de detectores: orb/akaze/brisk/sift/... (docs/03)
 │   │   ├── matching.py             #   Registro de matchers: ratio/crosscheck/flann/...
 │   │   ├── learned.py              #   Adaptadores GPU opcionales: SuperPoint/DISK/LightGlue
-│   │   └── tracker.py              #   TrackerBase: interfaz frame→pose
+│   │   └── tracker.py              #   TrackerBase + PnPTracker (3D-2D contra mapa, v0.2)
 │   │
 │   ├── backend/                    # ── CAPA 2: OPTIMIZACIÓN (por keyframe) ──
 │   │   └── factor_graph.py         #   FactorGraphBackend: interfaz de grafo de factores
 │   │                               #   + adaptadores GTSAM/g2o (stubs en v0.1)
 │   │
 │   ├── mapping/                    # ── CAPA 3: MAPEO INTERCAMBIABLE (asíncrono) ──
-│   │   └── base.py                 #   MapperBase: interfaz común
-│   │                               #   v0.2: SparsePointMapper (triangulación)
-│   │                               #   v0.5: GaussianSplattingMapper
-│   │                               #   futuro: NeRFMapper
+│   │   ├── base.py                 #   MapperBase: interfaz común
+│   │   └── sparse.py               #   SparsePointMapper: puntos anclados a keyframes,
+│   │                               #   re-anclaje en update_poses(), export PLY (v0.2)
+│   │                               #   v0.5: GaussianSplattingMapper | futuro: NeRFMapper
 │   │
 │   ├── io/                         # Entrada/salida: datasets y calibración
 │   │   └── dataset.py              #   ImageSequenceLoader; adaptadores TUM/KITTI/EuRoC (TODO)
@@ -69,13 +70,15 @@ Visual-slam/
 │   └── README.md                   #   Diseño de paquetes vslam_msgs / vslam_ros
 │
 ├── examples/                       # Puntos de entrada educativos, numerados
-│   └── 01_monocular_vo.py          #   VO monocular 2D-2D en un solo archivo comentado
+│   ├── 01_monocular_vo.py          #   VO monocular 2D-2D en un solo archivo comentado
+│   └── 02_pnp_tracking.py          #   Tracking 3D-2D contra mapa disperso (usa el paquete)
 ├── scripts/
 │   ├── make_synthetic_sequence.py  #   Genera secuencia sintética + ground truth (sin descargas)
 │   └── benchmark_frontends.py      #   Compara detectores/matchers: inliers, FPS, ATE
 └── tests/
     ├── test_pose_recovery.py       #   Verifica convenciones de pose y geometría epipolar
-    └── test_frontends.py           #   Verifica el registro de detectores/matchers
+    ├── test_frontends.py           #   Verifica el registro de detectores/matchers
+    └── test_triangulation_pnp.py   #   Verifica DLT, PnP robusto y re-anclaje del mapa
 ```
 
 ## 3. Flujo de datos

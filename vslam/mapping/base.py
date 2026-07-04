@@ -11,8 +11,9 @@ ni el backend se enteren. Para eso el contrato exige tres cosas:
    transformar submapas rígidamente; con campos implícitos: problema abierto).
 3. `get_map` devuelve algo exportable para visualización/evaluación.
 
-Implementaciones previstas:
-  - SparsePointMapper (v0.2): triangulación de matches entre keyframes.
+Implementaciones:
+  - SparsePointMapper (sparse.py, v0.2) ✓: puntos triangulados anclados a
+    keyframes, con re-anclaje rígido en update_poses().
   - GaussianSplattingMapper (v0.5): optimiza gaussianas 3D contra los keyframes
     por rasterización diferenciable (estilo MonoGS/Photo-SLAM).
   - NeRFMapper (futuro): campo neural con hash-grid (estilo NICE-SLAM/Co-SLAM).
