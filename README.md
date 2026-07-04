@@ -18,6 +18,7 @@ Repositorio de **Visual SLAM (vSLAM)** con doble propósito:
 |---|---|
 | [docs/01_estado_del_arte.md](docs/01_estado_del_arte.md) | Investigación comparativa: métodos clásicos (ORB-SLAM3, DSO), deep learning (DROID-SLAM, TartanVO) y mapeo de nueva generación (NeRF-SLAM, 3DGS-SLAM). |
 | [docs/02_arquitectura.md](docs/02_arquitectura.md) | Diseño del repositorio: contratos de datos, módulos intercambiables, estrategia C++/Python y plan de integración con ROS 2. |
+| [docs/03_detectores_y_matchers.md](docs/03_detectores_y_matchers.md) | Catálogo razonado de 12 detectores y 6 matchers (clásicos y aprendidos): idea matemática, costos y guía de selección. |
 
 ## Estructura
 
@@ -26,7 +27,7 @@ Visual-slam/
 ├── docs/          # Investigación y decisiones de diseño
 ├── vslam/         # Paquete Python (implementación de referencia)
 │   ├── core/      #   Tipos comunes: Frame, PinholeCamera, Trajectory
-│   ├── frontend/  #   Tracking: extracción de características, matching
+│   ├── frontend/  #   Tracking: registros intercambiables de detectores y matchers
 │   ├── backend/   #   Optimización: interfaz de grafo de factores (GTSAM/g2o)
 │   ├── mapping/   #   Mapeo intercambiable: disperso hoy, 3DGS/NeRF mañana
 │   └── io/        #   Carga de datasets y calibración
@@ -52,7 +53,14 @@ python scripts/make_synthetic_sequence.py --output data/synthetic
 python examples/01_monocular_vo.py --images data/synthetic/images --calib data/synthetic/calib.txt --output output/synthetic
 
 # 4) Resultados: output/synthetic/trajectory.txt (formato TUM) y trajectory.png
+
+# 5) Cambiar el frontend por configuración (opciones: docs/03) y comparar con datos:
+python examples/01_monocular_vo.py --detector akaze --matcher crosscheck --images data/synthetic/images --calib data/synthetic/calib.txt
+python scripts/benchmark_frontends.py     # tabla: matches, inliers, FPS y ATE por frontend
 ```
+
+Los frontends aprendidos (SuperPoint, DISK, LightGlue) son opcionales:
+`pip install -e ".[deep]"` + `pip install git+https://github.com/cvg/LightGlue.git`.
 
 También funciona con cualquier carpeta de imágenes ordenadas alfabéticamente (KITTI, TUM,
 tus propios videos exportados a frames) si le pasas la calibración `fx fy cx cy` en un `.txt`.
@@ -72,6 +80,7 @@ Cada bloque del ejemplo indica a qué módulo de `vslam/` corresponde en la arqu
 ## Hoja de ruta
 
 - [x] **v0.1** — Esqueleto: VO monocular 2D-2D, contratos de datos, interfaces de backend/mapper.
+- [x] **v0.1.5** — Frontend configurable: 6 detectores clásicos + adaptadores aprendidos (SuperPoint/DISK/LightGlue), y benchmark con ATE ([scripts/benchmark_frontends.py](scripts/benchmark_frontends.py)).
 - [ ] **v0.2** — Triangulación + tracking 3D-2D (PnP), selección de keyframes, mapa disperso persistente.
 - [ ] **v0.3** — Backend real: grafo de poses con GTSAM, cierre de bucle (bolsa de palabras).
 - [ ] **v0.4** — Núcleo C++ del frontend (KLT/ORB) con bindings pybind11.

@@ -53,8 +53,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from vslam.core.camera import PinholeCamera          # Paso 1/4: intrínsecos K
 from vslam.core.trajectory import Trajectory         # Paso 5: acumulación/exportación
-from vslam.frontend.features import FeatureExtractor  # Paso 2: ORB
-from vslam.frontend.matching import match_descriptors  # Paso 3: ratio test
+from vslam.frontend.features import available_extractors, create_extractor  # Paso 2
+from vslam.frontend.matching import available_matchers, create_matcher      # Paso 3
 from vslam.io.dataset import ImageSequenceLoader      # Paso 1: secuencia
 
 
@@ -103,9 +103,13 @@ class MonocularVO:
     # baseline entre frames (ver la nota "TRAMPA CLÁSICA" en process_frame).
     CHEIRALITY_DIST_THRESH = 2000.0
 
-    def __init__(self, camera: PinholeCamera, n_features: int = 2000) -> None:
+    def __init__(self, camera: PinholeCamera, extractor=None, matcher=None) -> None:
         self.camera = camera
-        self.extractor = FeatureExtractor(n_features=n_features)
+        # Detector y matcher son INTERCAMBIABLES (registros de vslam/frontend;
+        # análisis de cada opción en docs/03_detectores_y_matchers.md). El
+        # resto del pipeline no sabe cuál corre: esa es la tesis del repo.
+        self.extractor = extractor or create_extractor("orb")
+        self.matcher = matcher or create_matcher("ratio")
 
         self.T_w_c = np.eye(4)          # pose actual (mundo <- cámara)
         self.T_prev_rel = np.eye(4)     # último movimiento relativo (para el
@@ -132,11 +136,16 @@ class MonocularVO:
 
         prev_kps, prev_desc = self._prev
 
-        # ── PASO 3 · Matching con ratio test (vslam/frontend/matching) ───────
-        # Buscamos el mismo punto físico visto en ambos frames. El ratio test
-        # de Lowe descarta correspondencias ambiguas (texturas repetitivas):
-        # matches limpios ahora = RANSAC más barato y fiable después.
-        matches = match_descriptors(prev_desc, descriptors, ratio=0.75)
+        # ── PASO 3 · Matching (vslam/frontend/matching) ──────────────────────
+        # Buscamos el mismo punto físico visto en ambos frames. El matcher es
+        # configurable (--matcher): ratio test de Lowe por defecto, que
+        # descarta correspondencias ambiguas (texturas repetitivas): matches
+        # limpios ahora = RANSAC más barato y fiable después. Se pasan también
+        # los keypoints y el tamaño de imagen porque los matchers APRENDIDOS
+        # (LightGlue) razonan sobre posiciones, no solo sobre descriptores.
+        matches = self.matcher.match(prev_desc, descriptors,
+                                     kps_a=prev_kps, kps_b=keypoints,
+                                     image_shape=gray.shape)
         info["n_matches"] = len(matches)
 
         if len(matches) < self.MIN_MATCHES:
@@ -312,6 +321,10 @@ def main() -> int:
     parser.add_argument("--output", default="output/run", help="carpeta de resultados")
     parser.add_argument("--max-frames", type=int, default=0, help="0 = todos")
     parser.add_argument("--show", action="store_true", help="ventana con los tracks en vivo")
+    parser.add_argument("--detector", default="orb", choices=available_extractors(),
+                        help="detector/descriptor de características (ver docs/03)")
+    parser.add_argument("--matcher", default="ratio", choices=available_matchers(),
+                        help="estrategia de emparejamiento (ver docs/03)")
     args = parser.parse_args()
 
     # ── PASO 1 · Carga (vslam/io/dataset) ─────────────────────────────────────
@@ -319,8 +332,11 @@ def main() -> int:
     loader = ImageSequenceLoader(args.images)
     print(f"Secuencia: {len(loader)} imágenes | K: fx={camera.fx} fy={camera.fy} "
           f"cx={camera.cx} cy={camera.cy}")
+    print(f"Frontend: detector={args.detector} matcher={args.matcher}")
 
-    vo = MonocularVO(camera)
+    vo = MonocularVO(camera,
+                     extractor=create_extractor(args.detector),
+                     matcher=create_matcher(args.matcher))
     trajectory = Trajectory()
 
     for i, (timestamp, gray) in enumerate(loader):

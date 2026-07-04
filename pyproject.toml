@@ -18,6 +18,9 @@ dependencies = [
 [project.optional-dependencies]
 viz = ["matplotlib>=3.7"]
 dev = ["pytest>=7"]
+# Frontends aprendidos (SuperPoint/DISK/LightGlue, ver docs/03 y frontend/learned.py).
+# Además: pip install git+https://github.com/cvg/LightGlue.git
+deep = ["torch>=2.0", "kornia>=0.7"]
 
 [tool.setuptools.packages.find]
 include = ["vslam*"]

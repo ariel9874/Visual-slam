@@ -42,8 +42,9 @@ Visual-slam/
 │   │   └── trajectory.py           #   Trayectoria + exportación formato TUM (evaluación)
 │   │
 │   ├── frontend/                   # ── CAPA 1: TRACKING RÁPIDO (por frame) ──
-│   │   ├── features.py             #   FeatureExtractor (ORB hoy; SuperPoint mañana)
-│   │   ├── matching.py             #   Matching + ratio test (LightGlue mañana)
+│   │   ├── features.py             #   Registro de detectores: orb/akaze/brisk/sift/... (docs/03)
+│   │   ├── matching.py             #   Registro de matchers: ratio/crosscheck/flann/...
+│   │   ├── learned.py              #   Adaptadores GPU opcionales: SuperPoint/DISK/LightGlue
 │   │   └── tracker.py              #   TrackerBase: interfaz frame→pose
 │   │
 │   ├── backend/                    # ── CAPA 2: OPTIMIZACIÓN (por keyframe) ──
@@ -56,8 +57,9 @@ Visual-slam/
 │   │                               #   v0.5: GaussianSplattingMapper
 │   │                               #   futuro: NeRFMapper
 │   │
-│   └── io/                         # Entrada/salida: datasets y calibración
-│       └── dataset.py              #   ImageSequenceLoader; adaptadores TUM/KITTI/EuRoC (TODO)
+│   ├── io/                         # Entrada/salida: datasets y calibración
+│   │   └── dataset.py              #   ImageSequenceLoader; adaptadores TUM/KITTI/EuRoC (TODO)
+│   └── evaluation.py               # ATE con alineación de Umeyama (métrica estándar)
 │
 ├── cpp/                            # ── NÚCLEO C++ (ruta de rendimiento) ──
 │   ├── CMakeLists.txt              #   Espeja la estructura de vslam/: core/, frontend/, ...
@@ -69,9 +71,11 @@ Visual-slam/
 ├── examples/                       # Puntos de entrada educativos, numerados
 │   └── 01_monocular_vo.py          #   VO monocular 2D-2D en un solo archivo comentado
 ├── scripts/
-│   └── make_synthetic_sequence.py  #   Genera secuencia sintética + ground truth (sin descargas)
+│   ├── make_synthetic_sequence.py  #   Genera secuencia sintética + ground truth (sin descargas)
+│   └── benchmark_frontends.py      #   Compara detectores/matchers: inliers, FPS, ATE
 └── tests/
-    └── test_pose_recovery.py       #   Verifica convenciones de pose y geometría epipolar
+    ├── test_pose_recovery.py       #   Verifica convenciones de pose y geometría epipolar
+    └── test_frontends.py           #   Verifica el registro de detectores/matchers
 ```
 
 ## 3. Flujo de datos
