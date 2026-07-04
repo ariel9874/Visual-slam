@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- C++ / CMake ---
+cpp/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# --- ROS 2 ---
+install/
+log/
+
+# --- Datos y resultados (no versionar datasets ni salidas) ---
+data/
+output/
+*.bag
+*.db3
+
+# --- IDE / SO ---
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

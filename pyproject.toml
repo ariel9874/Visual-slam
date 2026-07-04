@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vslam"
+version = "0.1.0"
+description = "Visual SLAM educativo y modular: frontend de tracking, backend de grafos de factores y mapeo intercambiable (preparado para 3DGS/NeRF y ROS 2)."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Ariel" }]
+keywords = ["slam", "visual-odometry", "robotics", "computer-vision", "gaussian-splatting"]
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.7"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["vslam*"]
