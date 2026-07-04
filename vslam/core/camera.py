@@ -1,8 +1,34 @@
 """Modelo de cámara pinhole (proyectiva ideal, sin distorsión).
 
+─── La matemática: proyección central ───────────────────────────────────────
+Un punto X_c = (X, Y, Z) expresado en el frame de la cámara se proyecta al
+plano imagen dividiendo por su profundidad:
+
+    x_n = X/Z ,   y_n = Y/Z        (coordenadas "normalizadas": plano Z = 1)
+
+y los intrínsecos convierten esas coordenadas métricas a píxeles:
+
+    u = fx·x_n + cx ,   v = fy·y_n + cy
+
+En forma matricial homogénea (λ absorbe la división por Z):
+
+    λ·[u, v, 1]^T = K · X_c ,  λ = Z ,  K = [[fx,  0, cx],
+                                             [ 0, fy, cy],
+                                             [ 0,  0,  1]]
+
+  - fx, fy: focal en píxeles (focal física / tamaño del píxel del sensor).
+  - (cx, cy): punto principal — donde el eje óptico atraviesa el sensor.
+  - La inversa K^{-1}·[u, v, 1]^T devuelve el RAYO que pasa por el píxel
+    (dirección, sin profundidad).
+
+La proyección DESTRUYE la profundidad: todos los puntos de la semirrecta
+λ·(x_n, y_n, 1) con λ > 0 caen en el mismo píxel. Esa pérdida es el origen de
+(a) la necesidad de triangular desde ≥ 2 vistas para tener 3D, y
+(b) la ambigüedad de escala de TODO el SLAM monocular.
+──────────────────────────────────────────────────────────────────────────────
+
 Convenciones (fijadas para todo el repo, ver docs/02_arquitectura.md §4):
   - Ejes de cámara estilo OpenCV: +Z hacia delante, +X derecha, +Y abajo.
-  - K es la matriz de intrínsecos 3x3:  [[fx, 0, cx], [0, fy, cy], [0, 0, 1]]
 
 En v0.1 asumimos imágenes ya rectificadas (sin distorsión radial/tangencial).
 Un modelo con distorsión (Brown-Conrady, Kannala-Brandt para fisheye) entrará

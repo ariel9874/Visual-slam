@@ -63,8 +63,20 @@ from vslam.io.dataset import ImageSequenceLoader      # Paso 1: secuencia
 def invert_se3(T: np.ndarray) -> np.ndarray:
     """Inversa cerrada de una transformación rígida 4x4.
 
-    Si T = [R | t; 0 | 1], entonces T^-1 = [R^T | -R^T t; 0 | 1].
-    (Mucho más barato y estable que np.linalg.inv para SE(3).)
+    ─── La matemática: el grupo SE(3) ───
+    Una pose es T = [[R, t], [0, 1]] con R ∈ SO(3) (RᵀR = I, det R = +1) y
+    t ∈ ℝ³. Actúa sobre puntos como X' = R·X + t, y componer dos poses es
+    multiplicar sus matrices (¡el orden importa: SE(3) no es conmutativo!).
+
+    Para invertir, despeja X de X' = R·X + t:
+        X = Rᵀ·X' − Rᵀ·t    ⇒    T⁻¹ = [[Rᵀ, −Rᵀ·t], [0, 1]]
+    La forma cerrada es más barata que np.linalg.inv y garantiza que el
+    resultado siga siendo exactamente rígido (Rᵀ es rotación perfecta;
+    la inversa numérica genérica solo lo sería aproximadamente).
+
+    Notación del repo: T_a_b lleva puntos del frame b al frame a. Los
+    subíndices se encadenan "cancelándose", como unidades:
+        T_w_c2 = T_w_c1 · T_c1_c2      (w←c1 por c1←c2 da w←c2)
     """
     R, t = T[:3, :3], T[:3, 3]
     Ti = np.eye(4)
@@ -135,16 +147,40 @@ class MonocularVO:
         pts_curr = np.float64([keypoints[m.trainIdx].pt for m in matches])
 
         # ── PASO 4 · Geometría epipolar (futuro vslam/frontend/tracker) ──────
-        # La matriz esencial E codifica la rotación y traslación entre dos
-        # vistas calibradas: x_curr^T · E · x_prev = 0 para correspondencias
-        # correctas (en coordenadas normalizadas por K).
         #
-        # RANSAC es imprescindible: aunque el ratio test limpió mucho, siguen
-        # quedando matches erróneos (outliers) y la estimación por mínimos
-        # cuadrados se arruinaría con uno solo. RANSAC busca el modelo E con
-        # más consenso y marca los inliers. (El solver de 5 puntos de Nistér
-        # funciona incluso con escenas planas, donde el clásico de 8 puntos
-        # para F degenera.)
+        # ─── La matemática: la restricción epipolar ───
+        # Sea X un punto 3D visto por ambas cámaras, relacionadas por la pose
+        # relativa (R, t):  X_curr = R·X_prev + t. Trabajamos con RAYOS en
+        # coordenadas normalizadas x̂ = K⁻¹·[u, v, 1]ᵀ (los píxeles fuera).
+        #
+        # Los vectores x̂_curr, R·x̂_prev y t son COPLANARES: los dos rayos y el
+        # baseline forman el "plano epipolar" que contiene a X y a ambos
+        # centros ópticos. Coplanaridad = triple producto escalar nulo:
+        #
+        #     x̂_curr · (t × R·x̂_prev) = 0
+        #  ⇔  x̂_currᵀ · [t]_× · R · x̂_prev = 0 ,       E ≜ [t]_× · R
+        #
+        # donde [t]_× es la matriz antisimétrica que implementa "t × ·":
+        #     [t]_× = [[  0, -t3,  t2],
+        #              [ t3,   0, -t1],
+        #              [-t2,  t1,   0]]
+        #
+        # E (matriz ESENCIAL) empaqueta la rotación y la DIRECCIÓN de t en una
+        # sola 3x3. Tiene 5 grados de libertad (3 de R + 2 de dirección de t:
+        # la ecuación es homogénea, la escala no cuenta) → bastan 5
+        # correspondencias: el solver de 5 puntos de Nistér, que además tolera
+        # escenas planas donde el clásico de 8 puntos degenera.
+        #
+        # ─── La matemática: RANSAC ───
+        # El ratio test limpió mucho, pero UN solo outlier arruina un ajuste
+        # por mínimos cuadrados. RANSAC itera: muestrear 5 matches al azar →
+        # resolver E → contar cuántos matches la satisfacen (distancia
+        # epipolar < threshold px) → quedarse con el E de mayor consenso y
+        # marcar sus inliers. Si w es la fracción de inliers, una muestra de
+        # 5 sale toda-inlier con probabilidad w⁵, así que para acertar con
+        # probabilidad p bastan
+        #     N = log(1 − p) / log(1 − w⁵)   iteraciones
+        # (con w = 0.5 y p = 0.999, N ≈ 218: por eso corre en tiempo real).
         E, inlier_mask = cv2.findEssentialMat(
             pts_prev, pts_curr, self.camera.K,
             method=cv2.RANSAC, prob=self.RANSAC_PROB,
@@ -153,11 +189,23 @@ class MonocularVO:
         if E is None or E.shape != (3, 3):
             return self._coast(keypoints, descriptors, info)
 
-        # Descomponer E da 4 combinaciones (R, t) posibles; recoverPose elige
-        # la única que deja los puntos triangulados DELANTE de ambas cámaras
-        # (test de quiralidad). Devuelve la transformación T_curr<-prev:
-        # lleva puntos del frame de la cámara anterior al de la actual,
-        # con ||t|| = 1 (aquí está la ambigüedad de escala monocular).
+        # ─── La matemática: de E a (R, t) ───
+        # Con la SVD  E = U·diag(1, 1, 0)·Vᵀ  existen CUATRO factorizaciones
+        # E = [t]_×·R:
+        #     R ∈ { U·W·Vᵀ ,  U·Wᵀ·Vᵀ }     con  W = [[0,-1,0],[1,0,0],[0,0,1]]
+        #     t ∈ { +u3 , -u3 }             (u3 = 3.ª columna de U, ||t|| = 1)
+        # — el "twisted pair" (dos rotaciones) por el signo del baseline. Solo
+        # UNA combinación deja los puntos triangulados con profundidad positiva
+        # en ambas cámaras: ese es el test de quiralidad que recoverPose hace
+        # por nosotros. Devuelve T_curr<-prev (puntos del frame anterior al
+        # actual).
+        #
+        # ¿Por qué ||t|| = 1? Porque E = [t]_×·R es homogénea en t: si
+        # (R, t, {X_i}) explica las imágenes, (R, s·t, {s·X_i}) las explica
+        # EXACTAMENTE igual para todo s > 0. Una cámara monocular no puede
+        # medir la escala del mundo; se fija ||t|| = 1 por convención. (En
+        # v0.2 la escala se heredará del mapa triangulado; estéreo o IMU la
+        # harían métrica de verdad.)
         #
         # TRAMPA CLÁSICA de OpenCV (descubierta verificando este repo): la
         # sobrecarga básica de recoverPose solo acepta como inliers los puntos
@@ -178,11 +226,14 @@ class MonocularVO:
         if n_inliers < self.MIN_INLIERS:
             return self._coast(keypoints, descriptors, info)
 
-        # CASO DEGENERADO que debes conocer: si la cámara solo ROTA (baseline
-        # ~ 0), E no contiene información de traslación y t sale como ruido.
-        # Los sistemas serios lo detectan (p. ej. eligiendo entre homografía y
-        # esencial, como la inicialización de ORB-SLAM). Aquí lo documentamos
-        # y seguimos: es un ejemplo educativo.
+        # CASO DEGENERADO que debes conocer: si la cámara solo ROTA, el
+        # baseline t → 0 y con él E = [t]_×·R → 0: la restricción epipolar se
+        # satisface trivialmente y la dirección de t que devuelve el solver es
+        # puro ruido. (Matemáticamente: con t = 0 los rayos se relacionan por
+        # la homografía de rotación x̂_curr ~ R·x̂_prev, sin paralaje no hay
+        # traslación observable.) Los sistemas serios lo detectan eligiendo
+        # por consenso entre modelo de homografía y esencial — así inicializa
+        # ORB-SLAM. Aquí lo documentamos y seguimos: es un ejemplo educativo.
 
         # ── PASO 5 · Composición de la trayectoria (vslam/core/trajectory) ───
         # recoverPose nos dio T_curr<-prev; para acumular necesitamos el

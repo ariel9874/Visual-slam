@@ -6,6 +6,46 @@ los factores son restricciones probabilísticas entre ellas (odometría relativa
 cierres de bucle, priors). Optimizar = encontrar las variables que maximizan la
 verosimilitud conjunta (mínimos cuadrados no lineales: Gauss-Newton/LM).
 
+─── La matemática ────────────────────────────────────────────────────────────
+Estimación MAP. Variables Θ = {T_1 … T_n} (poses de keyframes, en SE(3)).
+Cada medida z_k tiene un modelo gaussiano p(z_k | Θ) ∝ exp(−½·‖e_k(Θ)‖²_Σk).
+Maximizar el producto de factores = (tomando −log) minimizar la suma de
+errores de Mahalanobis:
+
+    Θ* = argmin_Θ  Σ_k  e_k(Θ)ᵀ · Λ_k · e_k(Θ) ,      Λ_k = Σ_k⁻¹
+
+Λ es la MATRIZ DE INFORMACIÓN — por eso los métodos de abajo piden
+`information`: grande = medida fiable que "tira" fuerte; pequeña = medida
+ruidosa que apenas restringe.
+
+Error de un factor de odometría entre las poses i → j, con medida T̂_ij:
+
+    e_ij = Log( T̂_ij⁻¹ · T_i⁻¹ · T_j )  ∈ ℝ⁶
+
+Léelo así: T_i⁻¹·T_j es la transformación relativa que PREDICEN las variables
+actuales; se compara con la medida y el residuo se lleva al ESPACIO TANGENTE
+se(3) (3 de rotación + 3 de traslación) con el logaritmo de Lie. No se restan
+matrices 4×4: SE(3) es una variedad curva, no un espacio vectorial, y el
+error/la actualización solo tienen sentido en su tangente.
+
+Optimización (Gauss-Newton / Levenberg-Marquardt): linealizar cada residuo
+e(Θ ⊞ δ) ≈ e + J·δ y resolver las ecuaciones normales
+
+    (Jᵀ·Λ·J) · δ = −Jᵀ·Λ·e ,      Θ ← Θ ⊞ δ    (retracción a la variedad)
+
+iterando hasta converger (LM añade amortiguación (Jᵀ Λ J + μI) para dar pasos
+prudentes lejos del óptimo). La clave computacional: Jᵀ Λ J es DISPERSA porque
+cada factor toca 1-2 variables — GTSAM/g2o explotan esa dispersión con
+eliminación de variables, e iSAM2 actualiza la solución incrementalmente al
+llegar cada keyframe sin re-resolver el grafo entero.
+
+Cierre de bucle (v0.3): es solo UN factor más, entre poses lejanas en el
+tiempo. Al optimizar, el error acumulado en toda la cadena de odometría se
+redistribuye a lo largo de ella — así se "cose" la trayectoria. Sin bucles,
+este backend únicamente alisa la odometría (y eso ya reduce el zigzag del
+ejemplo 01).
+──────────────────────────────────────────────────────────────────────────────
+
 Esta interfaz aísla al resto del sistema de la librería concreta:
   - GTSAM  (primera opción: iSAM2 permite optimización incremental en línea)
   - g2o    (clásico en la literatura SLAM)

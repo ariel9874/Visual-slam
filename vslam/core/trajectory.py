@@ -16,8 +16,20 @@ import numpy as np
 def rotation_to_quaternion(R: np.ndarray) -> np.ndarray:
     """Convierte una matriz de rotación 3x3 a cuaternión (qx, qy, qz, qw).
 
-    Implementación numéricamente estable (método de Shepperd): elige la rama
-    según el mayor elemento diagonal para evitar cancelaciones.
+    ─── La matemática ───
+    Un cuaternión unitario q = (v·sin(θ/2), cos(θ/2)) codifica la rotación de
+    ángulo θ alrededor del eje unitario v. Ojo: q y −q representan la MISMA
+    rotación (doble cobertura de SO(3)). Los formatos de trayectoria (TUM) lo
+    prefieren a la matriz porque son 4 números con una sola restricción
+    (‖q‖ = 1), no sufre gimbal lock y se interpola bien (slerp).
+
+    La conversión invierte dos identidades de la fórmula de Rodrigues:
+        tr(R) = 1 + 2·cos(θ)          (la traza fija el ángulo)
+        R − R^T = 2·sin(θ)·[v]_x      (la parte antisimétrica fija el eje)
+    Método de Shepperd: cada rama calcula primero la componente de q de mayor
+    magnitud (según el elemento diagonal dominante) y deriva las demás de
+    ella, para no dividir nunca por un número pequeño — estabilidad numérica
+    incluso cerca de θ = 0 y θ = π, donde las fórmulas ingenuas cancelan.
     """
     R = np.asarray(R, dtype=np.float64)
     trace = np.trace(R)

@@ -65,7 +65,9 @@ def test_recover_pose_convention():
     t_gt = -R_w_c2.T @ C2
     t_gt_dir = t_gt / np.linalg.norm(t_gt)
 
-    # Rotación: ángulo del error R·R_gt^T cercano a 0.
+    # Rotación: distancia geodésica en SO(3). R·R_gtᵀ es "lo que falta por
+    # girar" entre estimación y verdad; su ángulo de eje-ángulo sale de la
+    # identidad tr(R_err) = 1 + 2·cos(θ):  θ = arccos((tr(R·R_gtᵀ) − 1)/2).
     cos_angle = (np.trace(R @ R_gt.T) - 1.0) / 2.0
     angle_deg = np.rad2deg(np.arccos(np.clip(cos_angle, -1, 1)))
     assert angle_deg < 0.5, f"error de rotación {angle_deg:.3f} grados"

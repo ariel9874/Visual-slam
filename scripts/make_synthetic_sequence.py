@@ -79,7 +79,25 @@ class TexturedPlane:
 
 def render_plane(canvas: np.ndarray, plane: TexturedPlane,
                  camera: PinholeCamera, R_w_c: np.ndarray, C: np.ndarray) -> None:
-    """Renderiza el plano sobre el canvas con la homografía exacta textura→imagen."""
+    """Renderiza el plano sobre el canvas con la homografía exacta textura→imagen.
+
+    ─── La matemática: homografía inducida por un plano ───
+    Para puntos que viven en un plano nᵀ·X = d, dos vistas pinhole se
+    relacionan por una HOMOGRAFÍA exacta (proyectividad 2D, 8 gdl):
+
+        x̂_2 ~ H·x̂_1   con   H = R + (t·nᵀ)/d     (coordenadas normalizadas;
+                                                   en píxeles: K·H·K⁻¹)
+
+    Es la misma H que usan los SLAM clásicos para inicializar en escenas
+    planas. Aquí no la construimos analíticamente: proyectamos las 4 esquinas
+    del quad y getPerspectiveTransform resuelve la única H que las casa
+    (4 puntos × 2 coordenadas = 8 ecuaciones = 8 gdl) — mismo resultado,
+    cero álgebra frágil de signos y normales.
+
+    Nota didáctica: si TODA la escena fuera un único plano, la estimación de
+    E sería ambigua/mal condicionada; por eso este generador usa TRES planos
+    a profundidades distintas (estructura 3D genuina con paralaje real).
+    """
     # Esquinas del plano en el frame de la cámara: X_c = R_w_c^T (X_w - C).
     corners_cam = (R_w_c.T @ (plane.world_corners() - C).T).T
     if np.any(corners_cam[:, 2] < 0.2):  # plano (parcialmente) detrás de la cámara
