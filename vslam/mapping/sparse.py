@@ -38,6 +38,7 @@ class SparsePointMapper(MapperBase):
         self._positions: List[np.ndarray] = []    # (3,) por punto, frame mundo
         self._descriptors: List[np.ndarray] = []  # (D,) por punto
         self._anchor_kf: List[int] = []           # keyframe que creó cada punto
+        self._active: List[bool] = []             # culling (v0.4b): NO se borra
         self._kf_poses: Dict[int, np.ndarray] = {}
         # Observaciones por keyframe: [(point_id, píxel (2,)), ...]
         self._obs: Dict[int, List[Tuple[int, np.ndarray]]] = {}
@@ -57,6 +58,7 @@ class SparsePointMapper(MapperBase):
             self._positions.append(np.asarray(p, dtype=np.float64))
             self._descriptors.append(np.asarray(d))
             self._anchor_kf.append(anchor_kf_id)
+            self._active.append(True)
         return list(range(start, len(self._positions)))
 
     def add_observations(self, kf_id: int, point_ids: Iterable[int],
@@ -65,6 +67,9 @@ class SparsePointMapper(MapperBase):
         entries = self._obs.setdefault(kf_id, [])
         for pid, uv in zip(point_ids, np.asarray(pixels, dtype=np.float64)):
             entries.append((int(pid), uv.copy()))
+            # Re-observar REVIVE un punto podado (v0.4b): si el cierre de bucle
+            # lo re-asocia al re-visitar su zona, vuelve al mapa activo.
+            self._active[int(pid)] = True
 
     # ── lectura (matching 3D-2D del tracker y BA del backend) ────────────────
 
@@ -81,16 +86,19 @@ class SparsePointMapper(MapperBase):
         if not self._positions:
             return (np.zeros(0, dtype=int), np.zeros((0, 3)),
                     np.zeros((0, 32), dtype=np.uint8))
+        # Los puntos DESACTIVADOS por el culling (v0.4b) no participan del
+        # matching: no se borran (los ids son índices estables), solo se saltan.
         if anchor_kfs is None:
-            ids = np.arange(len(self._positions))
+            ids = np.array([i for i in range(len(self._positions)) if self._active[i]],
+                           dtype=int)
         else:
             wanted = set(anchor_kfs)
-            ids = np.array([i for i, kf in enumerate(self._anchor_kf) if kf in wanted],
-                           dtype=int)
-            if len(ids) == 0:
-                return (np.zeros(0, dtype=int), np.zeros((0, 3)),
-                        np.zeros((0, self._descriptors[0].shape[0]),
-                                 dtype=self._descriptors[0].dtype))
+            ids = np.array([i for i, kf in enumerate(self._anchor_kf)
+                            if kf in wanted and self._active[i]], dtype=int)
+        if len(ids) == 0:
+            return (np.zeros(0, dtype=int), np.zeros((0, 3)),
+                    np.zeros((0, self._descriptors[0].shape[0]),
+                             dtype=self._descriptors[0].dtype))
         return (ids,
                 np.stack([self._positions[i] for i in ids]),
                 np.stack([self._descriptors[i] for i in ids]))
@@ -101,7 +109,8 @@ class SparsePointMapper(MapperBase):
         out = []
         for kf in kf_ids:
             for pid, uv in self._obs.get(kf, []):
-                out.append((kf, pid, uv))
+                if self._active[pid]:      # el culling (v0.4b) excluye del BA
+                    out.append((kf, pid, uv))
         return out
 
     def keyframe_pose(self, kf_id: int) -> np.ndarray:
@@ -117,14 +126,14 @@ class SparsePointMapper(MapperBase):
         característica física se re-triangula duplicada (medido: PnP
         biestable con teleports); con covisibilidad, re-entran solos.
         """
-        mine = {pid for pid, _ in self._obs.get(kf_id, [])}
+        mine = {pid for pid, _ in self._obs.get(kf_id, []) if self._active[pid]}
         if not mine:
             return []
         out = []
         for other, entries in self._obs.items():
             if other == kf_id:
                 continue
-            shared = sum(1 for pid, _ in entries if pid in mine)
+            shared = sum(1 for pid, _ in entries if pid in mine and self._active[pid])
             if shared >= min_shared:
                 out.append(other)
         return out
@@ -216,10 +225,58 @@ class SparsePointMapper(MapperBase):
                 self._positions[i] = delta[:3, :3] @ p + delta[:3, 3]
 
     def get_map(self) -> np.ndarray:
-        """Nube de puntos (M, 3) en el frame del mundo."""
-        if not self._positions:
+        """Nube de puntos ACTIVOS (M, 3) en el frame del mundo (v0.4b: excluye
+        los desactivados por el culling)."""
+        active = [p for p, ok in zip(self._positions, self._active) if ok]
+        if not active:
             return np.zeros((0, 3))
-        return np.stack(self._positions)
+        return np.stack(active)
+
+    # ── mantenimiento del mapa (v0.4b) ────────────────────────────────────────
+
+    def cull_points(self, kf_ids: List[int], min_obs: int = 3,
+                    min_age_kfs: int = 3) -> int:
+        """Desactiva puntos poco fiables: los que acumularon MENOS de `min_obs`
+        observaciones tras haber tenido tiempo de re-observarse (su keyframe
+        ancla quedó ≥ `min_age_kfs` keyframes atrás). Devuelve cuántos desactivó.
+
+        ─── La matemática / el criterio (con su medición) ───
+        Todo punto NACE con exactamente 2 observaciones: los dos extremos de su
+        triangulación se registran siempre (es la lección del punto de una sola
+        observación — C_p de rango 2 — que hacía EMPEORAR el BA). Por eso el
+        umbral honesto es `min_obs = 3`: un punto que ningún keyframe volvió a
+        ver DESPUÉS de su par fundacional (medido: `min_obs = 2` no descarta
+        nada — es un no-op). Un punto así, con varios keyframes ya pasados por
+        su zona, casi siempre es una triangulación espuria (ruido, match malo)
+        que solo engorda el mapa y ralentiza el matching. La ventana de gracia
+        `min_age_kfs` evita castigar al punto recién nacido que aún no ha tenido
+        ocasión de re-observarse (el BA opera sobre las últimas KF).
+        No se BORRA (los ids son índices estables — invariante del diseño):
+        se marca inactivo y deja de aparecer en snapshot/observations/get_map.
+        Los puntos culled SIGUEN accesibles por id explícito (point_positions):
+        el cierre de bucle y la reloc pueden re-verificar contra ellos, y una
+        re-observación los REVIVE (add_observations) — así el puente de
+        covisibilidad (lección 14) no se rompe al re-visitar una zona podada.
+        """
+        obs_count: Dict[int, int] = {}
+        for entries in self._obs.values():
+            for pid, _ in entries:
+                obs_count[pid] = obs_count.get(pid, 0) + 1
+        order = {kf: i for i, kf in enumerate(kf_ids)}
+        newest = len(kf_ids) - 1
+        culled = 0
+        for pid in range(len(self._positions)):
+            if not self._active[pid]:
+                continue
+            age = newest - order.get(self._anchor_kf[pid], newest)
+            if age >= min_age_kfs and obs_count.get(pid, 0) < min_obs:
+                self._active[pid] = False
+                culled += 1
+        return culled
+
+    def active_count(self) -> int:
+        """Puntos vivos (para métricas/diagnóstico del culling)."""
+        return sum(self._active)
 
     # ── exportación ───────────────────────────────────────────────────────────
 

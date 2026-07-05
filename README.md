@@ -20,6 +20,7 @@ Repositorio de **Visual SLAM (vSLAM)** con doble propósito:
 | [docs/02_arquitectura.md](docs/02_arquitectura.md) | Diseño del repositorio: contratos de datos, módulos intercambiables, estrategia C++/Python y plan de integración con ROS 2. |
 | [docs/03_detectores_y_matchers.md](docs/03_detectores_y_matchers.md) | Catálogo razonado de 12 detectores y 6 matchers (clásicos y aprendidos): idea matemática, costos y guía de selección. |
 | [docs/04_hoja_de_ruta_v1.md](docs/04_hoja_de_ruta_v1.md) | El plan completo hacia v1.0: etapas, criterios de aceptación medibles, riesgos y lo que deliberadamente queda fuera. |
+| [docs/05_estado_y_plan_de_continuacion.md](docs/05_estado_y_plan_de_continuacion.md) | Documento de traspaso: estado exacto con números, metodología, las 17 lecciones medidas, deuda técnica y el siguiente paso detallado. |
 
 ## Estructura
 

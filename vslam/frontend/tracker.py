@@ -106,6 +106,13 @@ class PnPTracker(TrackerBase):
     LOOP_MIN_MATCHES = 200      # matches brutos para considerar un candidato
     LOOP_MIN_INLIERS = 40       # inliers PnP de la verificación geométrica
     LOOP_COOLDOWN = 40          # frames sin reintentar tras cerrar un bucle
+    # ── relocalización + compuerta de movimiento (v0.4b) ──
+    RELOC_AFTER = 3             # frames en coast antes de intentar relocalizar
+    RELOC_MIN_MATCHES = 150     # más laxo que LOOP: aquí no hay bucle sin sentido
+    RELOC_MIN_INLIERS = 40      # inliers PnP para aceptar la relocalización
+    GATE_MIN_SAMPLES = 20       # historial mínimo antes de activar la compuerta
+    GATE_STEP_FACTOR = 6.0      # rechazar pasos > FACTOR × percentil 95 del historial
+    GATE_HISTORY = 200          # ventana del historial de pasos aceptados
 
     def __init__(self, camera: PinholeCamera, extractor=None, matcher=None,
                  mapper: Optional[SparsePointMapper] = None,
@@ -138,12 +145,15 @@ class PnPTracker(TrackerBase):
         self._kf_db: list = []           # historial para reconocimiento de lugar
         self._last_loop_frame = -10 ** 9
         self.loop_events: list = []      # [(frame, kf_antiguo)] para informes
+        self.reloc_events: list = []     # [(frame, kf_reconocido)] (v0.4b)
 
         self.T_w_c = np.eye(4)
         self._T_prev = np.eye(4)         # pose anterior (para velocidad constante)
         self._T_rel = np.eye(4)          # último movimiento (coasting)
         self._initialized = False
         self._frame_idx = -1
+        self._coast_count = 0            # frames consecutivos en coast (v0.4b)
+        self._step_history: list = []    # ||paso|| de poses aceptadas (compuerta)
 
         # Referencia de inicialización y último keyframe.
         self._ref: Optional[Tuple[list, np.ndarray]] = None   # (kps, desc)
@@ -292,6 +302,7 @@ class PnPTracker(TrackerBase):
                     "mp": dict(zip(idx_curr.tolist(), ids)), "T": T_w_c1.copy()}
         self._kf_inliers = len(ids)
         self._frames_since_kf = 0
+        self._coast_count = 0
         self._initialized = True
         self._init_buffer = []
         info.update(tracked=True, n_inliers=int(valid.sum()), state="INIT-OK")
@@ -354,7 +365,7 @@ class PnPTracker(TrackerBase):
         matches = self.matcher.match(map_desc, desc, None, kps, gray.shape)
         info["n_matches"] = len(matches)
         if len(matches) < self.MIN_MAP_MATCHES:
-            self._coast(info)
+            self._coast(gray, kps, desc, info)
             return
 
         obj = map_pts[[m.queryIdx for m in matches]]
@@ -362,23 +373,38 @@ class PnPTracker(TrackerBase):
 
         T_w_c, inlier_mask = solve_pnp(self.camera, obj, img)
         if T_w_c is None or inlier_mask.sum() < self.MIN_PNP_INLIERS:
-            self._coast(info)
+            self._coast(gray, kps, desc, info)
             return
 
-        # NOTA (compuerta de movimiento, probada y RETIRADA — v0.4): rechazar
-        # poses que salten mucho respecto al movimiento reciente suena bien,
-        # pero medimos que corta por ambos lados: bloquea los teletransportes
-        # falsos Y las recuperaciones legítimas tras un tramo de deriva (ATE
-        # 8.4 → 37.7 cm solo por la compuerta). Solo tiene sentido emparejada
-        # con RELOCALIZACIÓN (que decide a cuál modo volver); hasta entonces,
-        # el ataque correcto a los saltos es eliminar su causa: los puntos
-        # duplicados del mapa (ver el filtro anti-duplicados en
-        # _insert_keyframe).
+        # COMPUERTA DE MOVIMIENTO (v0.4b, ahora SÍ — emparejada con reloc).
+        # ─── La matemática / la lección medida ───
+        # En v0.4 esta compuerta se probó SOLA y cortaba por ambos lados:
+        # bloqueaba los teletransportes falsos Y las recuperaciones legítimas
+        # tras un tramo de deriva (ATE 8.4 → 37.7 cm), y con referencia de
+        # ventana reciente se auto-congelaba tras una pausa (→202 cm). Se
+        # retiró. La cura no era ajustar el umbral: era darle una SALIDA. Al
+        # rechazar un paso anómalo ya no nos quedamos ciegos — caemos a _coast,
+        # cuyo contador dispara la RELOCALIZACIÓN, que decide con verificación
+        # geométrica GLOBAL a qué pose volver (el paso legítimo grande se
+        # re-acepta vía reloc; el salto espurio no encuentra soporte y se
+        # descarta). Umbral robusto por percentil, no absoluto: 6 × el p95 de
+        # los pasos aceptados (con ≥ 20 muestras) — generoso con la dinámica
+        # real, cerrado a los saltos de un modo falso del PnP.
+        step = float(np.linalg.norm(T_w_c[:3, 3] - self._T_prev[:3, 3]))
+        if len(self._step_history) >= self.GATE_MIN_SAMPLES:
+            p95 = float(np.percentile(self._step_history, 95))
+            if step > self.GATE_STEP_FACTOR * p95:
+                info["state"] = "GATE-REJECT"
+                self._coast(gray, kps, desc, info)
+                return
 
         # Pose absoluta contra el mapa: no se apila sobre la anterior.
         self._T_rel = invert_se3(self._T_prev) @ T_w_c
         self._T_prev = T_w_c.copy()
         self.T_w_c = T_w_c
+        self._coast_count = 0
+        self._step_history.append(step)
+        self._step_history = self._step_history[-self.GATE_HISTORY:]
         n_inliers = int(inlier_mask.sum())
         info.update(tracked=True, n_inliers=n_inliers)
 
@@ -480,6 +506,13 @@ class PnPTracker(TrackerBase):
         if self.loop_closure:
             self._try_close_loop(gray, kps, desc, info)
 
+        # CULLING (v0.4b): tras refinar (BA) y cerrar bucles, retirar los puntos
+        # que nacieron hace varios keyframes y nadie volvió a observar — casi
+        # siempre triangulaciones espurias. Adelgaza el mapa sin tocar la zona
+        # activa (la ventana de gracia protege lo recién creado). Ver
+        # SparsePointMapper.cull_points para el criterio y la medición.
+        self.mapper.cull_points(self._kf_ids)
+
     def _run_local_ba(self) -> None:
         """Bundle adjustment sobre la ventana de keyframes recientes.
 
@@ -516,6 +549,28 @@ class PnPTracker(TrackerBase):
         self._T_prev = self.T_w_c.copy()
         self._kf["T"] = self.T_w_c.copy()
 
+    def _match_against_kf(self, old, gray, kps, desc):
+        """Empareja el frame actual contra un keyframe de la base y lo verifica
+        con PnP contra los puntos 3D de ese keyframe. Es el mecanismo común del
+        CIERRE DE BUCLE y de la RELOCALIZACIÓN (v0.4b): ambos reconocen un lugar
+        y confirman la geometría; solo cambia el filtro de candidatos (el bucle
+        exige antigüedad temporal, la reloc no) y los umbrales.
+
+        Devuelve (n_matches, pairs, T_pnp, inliers), donde `pairs` son los
+        (point_id_del_kf, idx_kp_actual) con correspondencia al mapa y `T_pnp`
+        es la pose del frame actual EN EL MARCO DEL MAPA (o None si PnP falla).
+        """
+        matches = self.matcher.match(old["desc"], desc, old["kps"], kps, gray.shape)
+        pairs = [(old["mp"][m.queryIdx], m.trainIdx) for m in matches
+                 if m.queryIdx in old["mp"]]
+        if len(pairs) < self.LOOP_MIN_INLIERS:
+            return len(matches), pairs, None, None
+        positions = self.mapper.point_positions(pid for pid, _ in pairs)
+        obj = np.array([positions[pid] for pid, _ in pairs])
+        img = np.float64([kps[t].pt for _, t in pairs])
+        T_pnp, inliers = solve_pnp(self.camera, obj, img)
+        return len(matches), pairs, T_pnp, inliers
+
     def _try_close_loop(self, gray, kps, desc, info) -> None:
         """Cierre de bucle en tres actos (el pipeline canónico del SLAM):
 
@@ -546,31 +601,30 @@ class PnPTracker(TrackerBase):
             return
         cur_id = self._kf["id"]
 
-        # 1) Reconocimiento de lugar.
+        # 1+2) Reconocimiento de lugar + verificación geométrica en un solo
+        # paso, vía el helper compartido con la relocalización (§_match_against_kf).
+        # De los candidatos con suficiente ANTIGÜEDAD (el filtro temporal: aquí
+        # sí, parecerse al pasado inmediato es continuidad, no un bucle) nos
+        # quedamos con el de más matches brutos que ADEMÁS pase la verificación
+        # PnP — antes se elegía el de más matches y si ese fallaba PnP se
+        # abortaba; ahora un candidato verificado nunca se pierde por culpa de
+        # otro no verificado.
         best = None
         for old in self._kf_db[:-1]:
             if cur_id - old["id"] < self.LOOP_TEMPORAL_GAP:
                 continue
-            matches = self.matcher.match(old["desc"], desc, old["kps"], kps,
-                                         gray.shape)
-            if len(matches) >= self.LOOP_MIN_MATCHES and \
-                    (best is None or len(matches) > len(best[1])):
-                best = (old, matches)
+            n_matches, pairs, T_loop, inliers = self._match_against_kf(
+                old, gray, kps, desc)
+            if n_matches < self.LOOP_MIN_MATCHES:
+                continue
+            if T_loop is None or len(pairs) < self.LOOP_MIN_INLIERS \
+                    or int(inliers.sum()) < self.LOOP_MIN_INLIERS:
+                continue
+            if best is None or n_matches > best[0]:
+                best = (n_matches, old, pairs, T_loop, inliers)
         if best is None:
             return
-        old, matches = best
-
-        # 2) Verificación geométrica contra los puntos 3D del candidato.
-        pairs = [(old["mp"][m.queryIdx], m.trainIdx) for m in matches
-                 if m.queryIdx in old["mp"]]
-        if len(pairs) < self.LOOP_MIN_INLIERS:
-            return
-        positions = self.mapper.point_positions(pid for pid, _ in pairs)
-        obj = np.array([positions[pid] for pid, _ in pairs])
-        img = np.float64([kps[t].pt for _, t in pairs])
-        T_loop, inliers = solve_pnp(self.camera, obj, img)
-        if T_loop is None or inliers.sum() < self.LOOP_MIN_INLIERS:
-            return
+        _, old, pairs, T_loop, inliers = best
 
         # 3) Corrección de la VENTANA LOCAL (el segmento cuyo gauge conocemos:
         # de ahí salen los puntos X_new). Un mismo keypoint del frame actual
@@ -641,12 +695,62 @@ class PnPTracker(TrackerBase):
 
     # ── auxiliares ─────────────────────────────────────────────────────────────
 
-    def _coast(self, info) -> None:
-        """Fallo de tracking: modelo de velocidad constante (como examples/01).
-        v0.3 intentará RELOCALIZAR contra el mapa antes de rendirse."""
+    def _coast(self, gray, kps, desc, info) -> None:
+        """Fallo (o rechazo) de tracking. Antes de rendirse a la velocidad
+        constante, tras RELOC_AFTER frames perdidos intenta RELOCALIZAR contra
+        toda la base de keyframes (v0.4b): el coast es el fallback si la reloc
+        falla. Sin este contador, un solo frame malo dispararía una búsqueda
+        global cara; con él, la reloc entra solo cuando de verdad estamos
+        perdidos (oclusión persistente, secuestro)."""
+        self._coast_count += 1
+        if self._coast_count >= self.RELOC_AFTER \
+                and self._relocalize(gray, kps, desc, info):
+            return
+        # Velocidad constante (como examples/01): extrapola el último movimiento.
         self.T_w_c = self.T_w_c @ self._T_rel
         self._T_prev = self.T_w_c.copy()
-        info["state"] = "COAST"
+        if not info["state"].startswith("GATE"):
+            info["state"] = "COAST"
+
+    def _relocalize(self, gray, kps, desc, info) -> bool:
+        """Recupera el tracking tras perderlo: reconoce el lugar contra TODA la
+        base de keyframes y lo verifica con PnP — el mismo mecanismo del cierre
+        de bucle SIN el filtro temporal (aquí parecerse a un keyframe reciente
+        NO es un problema: no corregimos el mapa, solo re-medimos nuestra pose).
+
+        ─── La matemática ───
+        Relocalizar es un PnP GLOBAL sin prior de pose: se descarta TODO el
+        estado de movimiento acumulado (la velocidad del coast ya no vale) y se
+        re-mide la pose absoluta desde apariencia + geometría. Es lo que permite
+        sobrevivir a un "secuestro" (la cámara teletransportada): un sistema que
+        solo integra movimiento no puede; uno que localiza contra un mapa, sí.
+        Riesgo conocido: el matching contra toda la db es O(KFs) — trivial con
+        ~15 KFs; a escala real es reconocimiento por bolsa de palabras (docs/03
+        §3). Se elige el candidato con MÁS inliers PnP (máximo soporte geométrico).
+        """
+        best = None
+        for old in self._kf_db:
+            n_matches, pairs, T_pnp, inliers = self._match_against_kf(
+                old, gray, kps, desc)
+            if n_matches < self.RELOC_MIN_MATCHES or T_pnp is None:
+                continue
+            n_inl = int(inliers.sum())
+            if n_inl < self.RELOC_MIN_INLIERS:
+                continue
+            if best is None or n_inl > best[1]:
+                best = (T_pnp, n_inl, old["id"])
+        if best is None:
+            return False
+        T_pnp, n_inl, old_id = best
+        # Aceptar la pose global y BORRAR la velocidad acumulada del coast: tras
+        # un secuestro, extrapolar el movimiento previo es justo lo incorrecto.
+        self.T_w_c = T_pnp
+        self._T_prev = T_pnp.copy()
+        self._T_rel = np.eye(4)
+        self._coast_count = 0
+        self.reloc_events.append((self._frame_idx, old_id))
+        info.update(tracked=True, n_inliers=n_inl, state="RELOC")
+        return True
 
     def _project(self, points_w: np.ndarray) -> np.ndarray:
         T_c_w = invert_se3(self.T_w_c)
