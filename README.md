@@ -64,6 +64,11 @@ python scripts/benchmark_frontends.py --trackers essential,pnp --detectors orb,s
 
 # 7) El backend: grafo de poses + cierre de bucle (v0.3, no necesita imágenes)
 python examples/03_pose_graph_loop.py --output output/pose_graph
+
+# 8) El sistema completo: mapa local + BA + cierre de bucle visual en una
+#    secuencia de corredor que re-visita el inicio (v0.35)
+python scripts/make_synthetic_sequence.py --output data/synthetic_loop --motion loop --frames 200
+python examples/04_loop_closure.py
 ```
 
 Los frontends aprendidos (SuperPoint, DISK, LightGlue) son opcionales:
@@ -90,8 +95,8 @@ Cada bloque del ejemplo indica a qué módulo de `vslam/` corresponde en la arqu
 - [x] **v0.1.5** — Frontend configurable: 6 detectores clásicos + adaptadores aprendidos (SuperPoint/DISK/LightGlue), y benchmark con ATE ([scripts/benchmark_frontends.py](scripts/benchmark_frontends.py)).
 - [x] **v0.2** — Triangulación (DLT) + tracking 3D-2D (PnP) contra mapa disperso persistente, con keyframes e inicialización validada por tercera vista ([vslam/frontend/tracker.py](vslam/frontend/tracker.py)). En la secuencia sintética: ATE 0.2 cm con SIFT (vs 4.8 cm del 2D-2D).
 - [x] **v0.3** — Backend real: álgebra de Lie SE(3) ([vslam/core/lie.py](vslam/core/lie.py)) + optimizador de grafo de poses en NumPy puro (Gauss-Newton/LM con kernel Huber, [vslam/backend/pose_graph.py](vslam/backend/pose_graph.py)) + demo de cierre de bucle con re-anclaje del mapa ([examples/03_pose_graph_loop.py](examples/03_pose_graph_loop.py)): ATE 1.09 m → 0.05 m con un solo factor de bucle.
-- [ ] **v0.35** — Detección visual de cierres de bucle (BoW/relocalización) + BA local integrados al `PnPTracker`; adaptador GTSAM (requiere Linux/conda: no hay wheel de Windows en PyPI).
-- [ ] **v0.4** — Núcleo C++ del frontend (KLT/ORB) con bindings pybind11.
+- [x] **v0.35** — Backend integrado al tracker: **BA local** con jacobianos analíticos y complemento de Schur ([vslam/backend/bundle_adjustment.py](vslam/backend/bundle_adjustment.py)) — ORB pasa de 6.9 a **2.6 cm** de ATE; **mapa local** (costo acotado), keyframes con intervalo máximo y piso de salud, y **cierre de bucle visual** (reconocimiento de lugar + verificación PnP + corrección de similitud CON escala, [examples/04_loop_closure.py](examples/04_loop_closure.py)): 8.4 → 6.7 cm en la secuencia de corredor con re-visita.
+- [ ] **v0.4** — Grafo de poses **Sim(3)** (distribuir también la escala por la cadena — la lección medida de v0.35), culling/fusión de puntos del mapa, adaptador GTSAM (Linux/conda: no hay wheel de Windows en PyPI), y núcleo C++ del frontend (KLT/ORB) con pybind11.
 - [ ] **v0.5** — Mapper de Gaussian Splatting (rasterizador diferenciable) detrás de la interfaz `MapperBase`.
 - [ ] **v0.6** — Nodos ROS 2 (frontend/backend/mapper como lifecycle nodes componibles).
 

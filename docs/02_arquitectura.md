@@ -51,8 +51,10 @@ Visual-slam/
 │   │
 │   ├── backend/                    # ── CAPA 2: OPTIMIZACIÓN (por keyframe) ──
 │   │   ├── factor_graph.py         #   FactorGraphBackend: interfaz + teoría MAP completa
-│   │   └── pose_graph.py           #   GaussNewtonPoseGraph: referencia NumPy (GN/LM +
-│   │                               #   Huber + gauge) — GTSAM queda como adaptador (v0.35)
+│   │   ├── pose_graph.py           #   GaussNewtonPoseGraph: referencia NumPy (GN/LM +
+│   │   │                           #   Huber + gauge) — GTSAM queda como adaptador (v0.4)
+│   │   └── bundle_adjustment.py    #   BA local: jacobianos analíticos + Schur + Huber
+│   │                               #   (y el gauge monocular de 7 gdl, medido)
 │   │
 │   ├── mapping/                    # ── CAPA 3: MAPEO INTERCAMBIABLE (asíncrono) ──
 │   │   ├── base.py                 #   MapperBase: interfaz común
@@ -74,7 +76,8 @@ Visual-slam/
 ├── examples/                       # Puntos de entrada educativos, numerados
 │   ├── 01_monocular_vo.py          #   VO monocular 2D-2D en un solo archivo comentado
 │   ├── 02_pnp_tracking.py          #   Tracking 3D-2D contra mapa disperso (usa el paquete)
-│   └── 03_pose_graph_loop.py       #   Backend: deriva → cierre de bucle → mapa re-anclado
+│   ├── 03_pose_graph_loop.py       #   Backend: deriva → cierre de bucle → mapa re-anclado
+│   └── 04_loop_closure.py          #   Sistema completo: mapa local + BA + bucle visual
 ├── scripts/
 │   ├── make_synthetic_sequence.py  #   Genera secuencia sintética + ground truth (sin descargas)
 │   └── benchmark_frontends.py      #   Compara detectores/matchers: inliers, FPS, ATE
@@ -82,7 +85,8 @@ Visual-slam/
     ├── test_pose_recovery.py       #   Verifica convenciones de pose y geometría epipolar
     ├── test_frontends.py           #   Verifica el registro de detectores/matchers
     ├── test_triangulation_pnp.py   #   Verifica DLT, PnP robusto y re-anclaje del mapa
-    └── test_pose_graph.py          #   Verifica Exp/Log de Lie y el grafo de poses
+    ├── test_pose_graph.py          #   Verifica Exp/Log de Lie y el grafo de poses
+    └── test_bundle_adjustment.py   #   Verifica el BA (jacobianos, gauge 7 gdl, Huber)
 ```
 
 ## 3. Flujo de datos

@@ -121,19 +121,37 @@ def main() -> int:
     parser.add_argument("--output", default="data/synthetic")
     parser.add_argument("--frames", type=int, default=80)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--motion", choices=["forward", "loop"], default="forward",
+                        help="forward: avance lateral constante (v0.1). "
+                             "loop: ida y VUELTA al origen — la trayectoria "
+                             "re-visita el inicio, el escenario que exige "
+                             "cierre de bucle (examples/04)")
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
     W, H = 640, 480
     camera = PinholeCamera(fx=450.0, fy=450.0, cx=W / 2, cy=H / 2, width=W, height=H)
 
-    # Tres planos a profundidades distintas (escena NO plana). El fondo es
-    # enorme para cubrir todo el recorrido; los cercanos dan paralaje fuerte.
-    planes = [  # de lejano a cercano (el orden de render resuelve la oclusión)
-        TexturedPlane(6.0, 0.0, 14.0, 18.0, 9.0, make_texture(2200, 1100, rng)),
-        TexturedPlane(1.5, 1.2, 8.0, 4.0, 2.6, make_texture(900, 600, rng)),
-        TexturedPlane(4.5, -1.0, 5.5, 2.2, 1.5, make_texture(640, 440, rng)),
-    ]
+    if args.motion == "loop":
+        # Escena de CORREDOR: carteles disjuntos a lo largo del recorrido, sin
+        # pared de fondo global. Cada cartel solo es visible en un tramo — la
+        # co-visibilidad entre el inicio y la mitad del recorrido es nula, y
+        # re-visitar el inicio es un cierre de bucle GENUINO (con la pared
+        # global de la escena "forward", todo era co-visible con todo y los
+        # bucles disparaban a mitad de camino sin significado).
+        planes = []
+        for i, bx in enumerate(np.arange(-2.0, 11.5, 1.9)):
+            depth = [3.8, 5.2, 4.4, 6.0][i % 4]
+            planes.append(TexturedPlane(float(bx), 0.0, depth, 1.4, 2.6,
+                                        make_texture(520, 900, rng)))
+    else:
+        # Tres planos a profundidades distintas (escena NO plana). El fondo es
+        # enorme para cubrir el recorrido; los cercanos dan paralaje fuerte.
+        planes = [  # de lejano a cercano (el orden resuelve la oclusión)
+            TexturedPlane(6.0, 0.0, 14.0, 18.0, 9.0, make_texture(2200, 1100, rng)),
+            TexturedPlane(1.5, 1.2, 8.0, 4.0, 2.6, make_texture(900, 600, rng)),
+            TexturedPlane(4.5, -1.0, 5.5, 2.2, 1.5, make_texture(640, 440, rng)),
+        ]
 
     out = Path(args.output)
     img_dir = out / "images"
@@ -143,10 +161,18 @@ def main() -> int:
     step = 0.05  # velocidad ~constante => la VO monocular (||t||=1) conserva la forma
 
     for k in range(args.frames):
-        # Pose real: avanza en +X con leve deriva en Z y giro de guiñada suave.
-        yaw = 0.003 * k
+        if args.motion == "loop":
+            # Ida y vuelta: x(0) = x(N−1) = 0. La cámara siempre mira a los
+            # planos (sin giros de 180°: el mundo sintético solo existe al
+            # frente), pero el punto de partida se RE-VISITA al final.
+            phase = np.pi * k / (args.frames - 1)
+            yaw = 0.0
+            C = np.array([7.0 * np.sin(phase), 0.0, 0.0])
+        else:
+            # Pose real: avanza en +X con leve deriva en Z y guiñada suave.
+            yaw = 0.003 * k
+            C = np.array([step * k, 0.0, 0.012 * k])
         R_w_c = rot_y(yaw)
-        C = np.array([step * k, 0.0, 0.012 * k])
         T_w_c = np.eye(4)
         T_w_c[:3, :3] = R_w_c
         T_w_c[:3, 3] = C

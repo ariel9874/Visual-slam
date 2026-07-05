@@ -37,6 +37,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from vslam.backend.bundle_adjustment import local_bundle_adjustment
 from vslam.core.camera import PinholeCamera
 from vslam.core.frame import Frame
 from vslam.core.geometry import invert_se3, solve_pnp, triangulate_two_views
@@ -93,12 +94,34 @@ class PnPTracker(TrackerBase):
     MIN_MAP_MATCHES = 30        # matches mapa↔frame para intentar PnP
     MIN_PNP_INLIERS = 15        # inliers mínimos para aceptar la pose
     KF_MIN_GAP = 3              # frames mínimos entre keyframes
+    KF_MAX_GAP = 15             # frames MÁXIMOS: insertar aunque no haya hambre
     KF_INLIER_RATIO = 0.6       # nuevo KF si inliers < 60% de los del último KF
     KF_MIN_INLIERS = 100        # ... o si caen de este absoluto
     CHEIRALITY_DIST_THRESH = 2000.0  # ver la "TRAMPA CLÁSICA" en examples/01
+    BA_WINDOW = 5               # keyframes en la ventana del BA local
+    BA_ITERATIONS = 6
+    # ── cierre de bucle (v0.35) ──
+    LOOP_TEMPORAL_GAP = 60      # frames mínimos de antigüedad del candidato
+    LOOP_MIN_MATCHES = 200      # matches brutos para considerar un candidato
+    LOOP_MIN_INLIERS = 40       # inliers PnP de la verificación geométrica
+    LOOP_COOLDOWN = 40          # frames sin reintentar tras cerrar un bucle
 
     def __init__(self, camera: PinholeCamera, extractor=None, matcher=None,
-                 mapper: Optional[SparsePointMapper] = None) -> None:
+                 mapper: Optional[SparsePointMapper] = None,
+                 local_window: Optional[int] = None,
+                 local_ba: bool = True,
+                 loop_closure: bool = False) -> None:
+        """Args (además del frontend intercambiable):
+            local_window: si se da, el matching 3D-2D usa solo los puntos de
+                los últimos N keyframes (mapa LOCAL: costo acotado, pero la
+                deriva reaparece — el escenario que exige cierre de bucle).
+                None = mapa global (comportamiento v0.2).
+            local_ba: refina la ventana de keyframes con bundle adjustment
+                tras cada inserción (vslam/backend/bundle_adjustment.py).
+            loop_closure: reconocimiento de lugar + verificación geométrica +
+                corrección por grafo de poses en cada keyframe (ver
+                _try_close_loop). Pensado para usarse con local_window.
+        """
         import cv2  # local para mantener el módulo importable en docs/tests ligeros
         self._cv2 = cv2
         self.camera = camera
@@ -107,6 +130,13 @@ class PnPTracker(TrackerBase):
         # Ojo: `mapper or ...` sería un bug — un mapper VACÍO define __len__=0
         # y Python lo evalúa como falsy, creando silenciosamente otro objeto.
         self.mapper = mapper if mapper is not None else SparsePointMapper()
+        self.local_window = local_window
+        self.local_ba = local_ba
+        self.loop_closure = loop_closure
+        self._kf_ids: list = []          # keyframes en orden de inserción
+        self._kf_db: list = []           # historial para reconocimiento de lugar
+        self._last_loop_frame = -10 ** 9
+        self.loop_events: list = []      # [(frame, kf_antiguo)] para informes
 
         self.T_w_c = np.eye(4)
         self._T_prev = np.eye(4)         # pose anterior (para velocidad constante)
@@ -242,6 +272,18 @@ class PnPTracker(TrackerBase):
         self.mapper.integrate_keyframe(Frame(frame_id=kf_id, timestamp=0.0,
                                              T_w_c=T_w_c1, is_keyframe=True))
         ids = self.mapper.add_points(pts, desc[idx_curr], anchor_kf_id=kf_id)
+        # Observaciones de ambos keyframes fundadores: el combustible del BA.
+        self.mapper.add_observations(0, ids, pts0[inl][valid])
+        self.mapper.add_observations(kf_id, ids, pts1[inl][valid])
+        self._kf_ids = [0, kf_id]
+        # Base de datos de keyframes para el reconocimiento de lugar.
+        idx_ref = np.array([m.queryIdx for m in matches])[inl][valid]
+        self._kf_db = [
+            {"id": 0, "kps": ref_kps, "desc": ref_desc,
+             "mp": dict(zip(idx_ref.tolist(), ids))},
+            {"id": kf_id, "kps": kps, "desc": desc,
+             "mp": dict(zip(idx_curr.tolist(), ids))},
+        ]
 
         self.T_w_c = T_w_c1
         self._T_prev = T_w_c1.copy()
@@ -287,7 +329,9 @@ class PnPTracker(TrackerBase):
 
     def _track_step(self, gray, kps, desc, info) -> None:
         info["state"] = "TRACK"
-        map_pts, map_desc = self.mapper.snapshot()
+        # Mapa global (v0.2) o LOCAL (últimos N keyframes): ver __init__.
+        window = None if self.local_window is None else self._kf_ids[-self.local_window:]
+        ids, map_pts, map_desc = self.mapper.snapshot(window)
 
         # Matching descriptores del MAPA (query) contra el frame (train).
         matches = self.matcher.match(map_desc, desc, None, kps, gray.shape)
@@ -315,12 +359,26 @@ class PnPTracker(TrackerBase):
         proj = self._project(obj[inlier_mask])
         info["pts_prev"], info["pts_curr"] = proj, img[inlier_mask]
 
-        # ¿Keyframe? Cuando el mapa visible se agota, hay que crecer.
+        # ¿Keyframe? Dos disparadores: HAMBRE (el mapa visible se agota) o
+        # INTERVALO MÁXIMO. El segundo es una lección de los sistemas reales
+        # (lo aprendimos midiendo: en una escena siempre co-visible el hambre
+        # nunca llega y el sistema pasó 90 frames sin un solo keyframe — sin
+        # KFs no hay BA, ni mapa local honesto, ni base para detectar bucles).
+        # ORB-SLAM lo resuelve insertando con generosidad y podando después.
+        # ... pero NUNCA desde una pose incierta: un keyframe con pocos
+        # inliers triangula cientos de puntos basura que envenenan el mapa
+        # (medido: un KF con 26 inliers creó 584 puntos y el tracker saltó
+        # 6 unidades en un frame). Si la pose es dudosa, mejor esperar.
         self._frames_since_kf += 1
         starving = (n_inliers < self.KF_INLIER_RATIO * self._kf_inliers
                     or n_inliers < self.KF_MIN_INLIERS)
-        if self._frames_since_kf >= self.KF_MIN_GAP and starving:
-            matched_frame_idx = {m.trainIdx: m.queryIdx
+        overdue = self._frames_since_kf >= self.KF_MAX_GAP
+        healthy = n_inliers >= 3 * self.MIN_PNP_INLIERS
+        if self._frames_since_kf >= self.KF_MIN_GAP and healthy \
+                and (starving or overdue):
+            # kp del frame → id GLOBAL del punto (ids traduce índices del
+            # snapshot — que puede ser un subconjunto local — a ids del mapa).
+            matched_frame_idx = {m.trainIdx: int(ids[m.queryIdx])
                                  for m, ok in zip(matches, inlier_mask) if ok}
             self._insert_keyframe(gray, kps, desc, matched_frame_idx, info)
 
@@ -333,9 +391,7 @@ class PnPTracker(TrackerBase):
                  if m.queryIdx not in kf["mp"] and m.trainIdx not in matched_frame_idx]
 
         kf_id = self._frame_idx
-        # Asociaciones del nuevo keyframe: kp del frame → id de punto del mapa
-        # (los queryIdx del matching contra el snapshot SON los ids: el mapper
-        # asigna ids = índices estables en orden de inserción).
+        # Asociaciones del nuevo keyframe: kp del frame → id global del punto.
         mp = dict(matched_frame_idx)
 
         if len(fresh) >= 10:
@@ -350,14 +406,165 @@ class PnPTracker(TrackerBase):
                 ids = self.mapper.add_points(points_w[valid], desc[idx_curr],
                                              anchor_kf_id=kf_id)
                 mp.update(dict(zip(idx_curr.tolist(), ids)))
+                # Registrar TAMBIÉN la observación en el keyframe previo (el
+                # otro extremo de la triangulación). Sin ella el punto queda
+                # con una sola observación y el BA puede deslizarlo libremente
+                # a lo largo de su rayo visual (C_p de rango 2: 3 incógnitas,
+                # 2 ecuaciones) — lo medimos: el BA EMPEORABA el ATE por esto.
+                self.mapper.add_observations(kf["id"], ids, pts0[valid])
 
         self.mapper.integrate_keyframe(Frame(frame_id=kf_id, timestamp=0.0,
                                              T_w_c=self.T_w_c.copy(), is_keyframe=True))
+        if mp:
+            kp_idx = list(mp.keys())
+            self.mapper.add_observations(
+                kf_id, list(mp.values()),
+                np.float64([kps[i].pt for i in kp_idx]))
+        self._kf_ids.append(kf_id)
         self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
                     "T": self.T_w_c.copy()}
+        self._kf_db.append({"id": kf_id, "kps": kps, "desc": desc, "mp": mp})
         self._kf_inliers = max(info["n_inliers"], 1)
         self._frames_since_kf = 0
         info["state"] = "TRACK+KF"
+
+        if self.local_ba:
+            self._run_local_ba()
+        if self.loop_closure:
+            self._try_close_loop(gray, kps, desc, info)
+
+    def _run_local_ba(self) -> None:
+        """Bundle adjustment sobre la ventana de keyframes recientes.
+
+        Se anclan los DOS keyframes más viejos de la ventana: uno fija
+        rotación/traslación y el segundo fija la ESCALA — el gauge monocular
+        tiene 7 grados de libertad (la lección medida en bundle_adjustment.py).
+        Simplificación v0.35: las observaciones desde keyframes fuera de la
+        ventana no participan (ORB-SLAM las incluye como cámaras fijas).
+        """
+        window = self._kf_ids[-self.BA_WINDOW:]
+        if len(window) < 3:
+            return
+        obs = self.mapper.observations(window)
+        if len(obs) < 60:
+            return
+        kf_poses = {k: self.mapper.keyframe_pose(k) for k in window}
+        # Solo se optimizan puntos con ≥ 2 observaciones DENTRO de la ventana:
+        # con una, el punto es libre a lo largo de su rayo (sub-determinado).
+        counts: dict = {}
+        for _, pid, _ in obs:
+            counts[pid] = counts.get(pid, 0) + 1
+        points = self.mapper.point_positions(
+            {pid for pid, c in counts.items() if c >= 2})
+        opt_poses, opt_points = local_bundle_adjustment(
+            self.camera, kf_poses, points, obs, fixed_kfs=set(window[:2]),
+            iterations=self.BA_ITERATIONS)
+
+        for k, T in opt_poses.items():
+            self.mapper.set_keyframe_pose(k, T)
+        self.mapper.set_point_positions(opt_points)
+        # El keyframe recién insertado ES el frame actual: heredar su refinado.
+        cur = self._kf["id"]
+        self.T_w_c = opt_poses[cur].copy()
+        self._T_prev = self.T_w_c.copy()
+        self._kf["T"] = self.T_w_c.copy()
+
+    def _try_close_loop(self, gray, kps, desc, info) -> None:
+        """Cierre de bucle en tres actos (el pipeline canónico del SLAM):
+
+        1. RECONOCIMIENTO DE LUGAR: ¿este keyframe se parece a uno antiguo?
+           Aquí, matching de descriptores por fuerza bruta contra la base de
+           keyframes (a decenas de KFs es trivial; a miles se usa bolsa de
+           palabras/BoW — mismo rol, costo sub-lineal). El filtro temporal
+           excluye keyframes recientes: parecerse al pasado inmediato no es
+           un bucle, es continuidad.
+        2. VERIFICACIÓN GEOMÉTRICA: la apariencia miente (pasillos gemelos);
+           la geometría no. PnP del frame actual contra los puntos 3D del
+           candidato: si converge con muchos inliers, da además la pose
+           actual EXPRESADA EN EL MARCO DEL SEGMENTO ANTIGUO — la medición
+           del bucle.
+        3. CORRECCIÓN tipo relocalización, con ESCALA (la lección monocular
+           dura, medida en este repo): la deriva monocular incluye escala
+           (14% sin BA local) y una corrección rígida SE(3) no puede
+           absorberla — reparte la inconsistencia como error de traslación y
+           EMPEORA el resultado (medido: ATE 35.9 → 94.1 cm). Es el motivo
+           por el que ORB-SLAM cierra bucles monoculares en Sim(3) (Strasdat
+           et al., RSS 2010). La versión mínima implementada aquí: los
+           puntos vistos por ambos segmentos existen DOS veces en el mapa
+           (gauge viejo y gauge derivado); la similitud (s, R, t) que casa
+           esas dos nubes (Umeyama, la matemática de vslam/evaluation.py)
+           re-alinea y RE-ESCALA la ventana local sobre el mapa antiguo. A
+           partir de ahí el tracking continúa en el gauge original.
+
+           Lo que NO se hace (todavía): redistribuir la corrección hacia
+           atrás por la cadena. Eso exige un grafo de poses Sim(3) (7 gdl
+           por nodo) — nuestro grafo SE(3) de backend/pose_graph.py lo
+           probamos aquí y, con deriva de escala, empeoraba las cosas.
+           Queda en la hoja de ruta (v0.4) con su propia álgebra en lie.py.
+        """
+        if self._frame_idx - self._last_loop_frame < self.LOOP_COOLDOWN:
+            return
+        cur_id = self._kf["id"]
+
+        # 1) Reconocimiento de lugar.
+        best = None
+        for old in self._kf_db[:-1]:
+            if cur_id - old["id"] < self.LOOP_TEMPORAL_GAP:
+                continue
+            matches = self.matcher.match(old["desc"], desc, old["kps"], kps,
+                                         gray.shape)
+            if len(matches) >= self.LOOP_MIN_MATCHES and \
+                    (best is None or len(matches) > len(best[1])):
+                best = (old, matches)
+        if best is None:
+            return
+        old, matches = best
+
+        # 2) Verificación geométrica contra los puntos 3D del candidato.
+        pairs = [(old["mp"][m.queryIdx], m.trainIdx) for m in matches
+                 if m.queryIdx in old["mp"]]
+        if len(pairs) < self.LOOP_MIN_INLIERS:
+            return
+        positions = self.mapper.point_positions(pid for pid, _ in pairs)
+        obj = np.array([positions[pid] for pid, _ in pairs])
+        img = np.float64([kps[t].pt for _, t in pairs])
+        T_loop, inliers = solve_pnp(self.camera, obj, img)
+        if T_loop is None or inliers.sum() < self.LOOP_MIN_INLIERS:
+            return
+
+        # 3) Corrección de la VENTANA LOCAL (el segmento cuyo gauge conocemos:
+        # de ahí salen los puntos X_new). Un mismo keypoint del frame actual
+        # puede estar asociado a un punto del mapa VIEJO (por el matching del
+        # bucle) y a otro del NUEVO (por el tracking local): esos pares de
+        # nubes 3D definen la similitud entre gauges.
+        loop_by_kp = {kp: pid for (pid, kp), ok in zip(pairs, inliers) if ok}
+        shared = [(self._kf["mp"][kp], pid_old)
+                  for kp, pid_old in loop_by_kp.items()
+                  if kp in self._kf["mp"] and self._kf["mp"][kp] != pid_old]
+
+        segment = (self._kf_ids[-self.local_window:] if self.local_window
+                   else [k for k in self._kf_ids if k > old["id"]])
+        if len(shared) >= 10:
+            from vslam.evaluation import umeyama_alignment
+            pos_new = self.mapper.point_positions(pid for pid, _ in shared)
+            pos_old = self.mapper.point_positions(pid for _, pid in shared)
+            X_new = np.array([pos_new[pid] for pid, _ in shared])
+            X_old = np.array([pos_old[pid] for _, pid in shared])
+            s, R_u, t_u = umeyama_alignment(X_new, X_old)   # nuevo → viejo
+        else:
+            # Sin nube compartida suficiente: corrección rígida que lleva la
+            # pose actual exactamente a la medición del bucle (sin escala).
+            delta = T_loop @ invert_se3(self.T_w_c)
+            s, R_u, t_u = 1.0, delta[:3, :3], delta[:3, 3]
+        self.mapper.apply_similarity(segment, s, R_u, t_u)
+
+        self.T_w_c = self.mapper.keyframe_pose(cur_id)
+        self._T_prev = self.T_w_c.copy()
+        self._kf["T"] = self.T_w_c.copy()
+
+        self._last_loop_frame = self._frame_idx
+        self.loop_events.append((self._frame_idx, old["id"]))
+        info["state"] = "TRACK+KF+LOOP"
 
     # ── auxiliares ─────────────────────────────────────────────────────────────
 

@@ -1,10 +1,13 @@
 """Mapa disperso de puntos: la primera implementación real de MapperBase.
 
 El mapa es la memoria del sistema: puntos 3D con su descriptor, contra los
-que el tracker hace matching 3D-2D (PnP) en cada frame. Cada punto queda
-ANCLADO al keyframe que lo creó — ese anclaje es lo que permite implementar
-`update_poses()` honestamente: si el backend corrige la pose de un keyframe
-(p. ej. tras un cierre de bucle en v0.3), sus puntos se re-anclan con la
+que el tracker hace matching 3D-2D (PnP) en cada frame. Desde v0.35 también
+almacena las OBSERVACIONES (keyframe, punto, píxel) — el combustible del
+bundle adjustment: sin saber quién vio qué y dónde, no hay nada que refinar.
+
+Cada punto queda ANCLADO al keyframe que lo creó — ese anclaje permite
+implementar `update_poses()` honestamente: si el backend corrige la pose de
+un keyframe (p. ej. tras un cierre de bucle), sus puntos se re-anclan con la
 misma corrección rígida:
 
     p'  =  T_nuevo · T_viejo⁻¹ · p        (delta de la pose del keyframe ancla)
@@ -12,14 +15,14 @@ misma corrección rígida:
 Es la versión dispersa de la estrategia de "submapas rígidos" que usan los
 sistemas de Gaussian Splatting para deformar el mapa tras un bucle (docs/01 §3.2).
 
-v0.2 deliberadamente simple: sin culling de puntos, sin fusión de duplicados,
-sin descriptor representativo multi-vista (TODOs para v0.3).
+Simplificaciones deliberadas que siguen pendientes: culling de puntos, fusión
+de duplicados y descriptor representativo multi-vista (TODOs para v0.4).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -29,13 +32,15 @@ from vslam.mapping.base import MapperBase
 
 
 class SparsePointMapper(MapperBase):
-    """Almacén de puntos 3D + descriptores, anclados a keyframes."""
+    """Almacén de puntos 3D + descriptores + observaciones, anclados a keyframes."""
 
     def __init__(self) -> None:
         self._positions: List[np.ndarray] = []    # (3,) por punto, frame mundo
         self._descriptors: List[np.ndarray] = []  # (D,) por punto
         self._anchor_kf: List[int] = []           # keyframe que creó cada punto
         self._kf_poses: Dict[int, np.ndarray] = {}
+        # Observaciones por keyframe: [(point_id, píxel (2,)), ...]
+        self._obs: Dict[int, List[Tuple[int, np.ndarray]]] = {}
 
     # ── escritura (la llama el tracker) ──────────────────────────────────────
 
@@ -54,22 +59,97 @@ class SparsePointMapper(MapperBase):
             self._anchor_kf.append(anchor_kf_id)
         return list(range(start, len(self._positions)))
 
-    # ── lectura (matching 3D-2D del tracker) ─────────────────────────────────
+    def add_observations(self, kf_id: int, point_ids: Iterable[int],
+                         pixels: np.ndarray) -> None:
+        """Registra que el keyframe observó estos puntos en estos píxeles."""
+        entries = self._obs.setdefault(kf_id, [])
+        for pid, uv in zip(point_ids, np.asarray(pixels, dtype=np.float64)):
+            entries.append((int(pid), uv.copy()))
 
-    def snapshot(self) -> Tuple[np.ndarray, np.ndarray]:
-        """(positions (M, 3), descriptors (M, D)) para el matching por frame.
+    # ── lectura (matching 3D-2D del tracker y BA del backend) ────────────────
 
-        v0.2 devuelve TODO el mapa (a esta escala, miles de puntos, el BF
-        matching lo absorbe). v0.3: "mapa local" por covisibilidad, como
-        ORB-SLAM, para que el costo no crezca con el recorrido.
+    def snapshot(self, anchor_kfs: Optional[Iterable[int]] = None
+                 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """(ids, positions (M, 3), descriptors (M, D)) para el matching.
+
+        Con `anchor_kfs` devuelve solo los puntos anclados a esos keyframes:
+        el "MAPA LOCAL". Es la palanca de escalabilidad clásica (el costo del
+        matching deja de crecer con el recorrido) y también lo que hace que
+        la deriva vuelva a existir — y con ella, la necesidad del cierre de
+        bucle. Sin argumento devuelve el mapa global (comportamiento v0.2).
         """
         if not self._positions:
-            dim = 32
-            return np.zeros((0, 3)), np.zeros((0, dim), dtype=np.uint8)
-        return np.stack(self._positions), np.stack(self._descriptors)
+            return (np.zeros(0, dtype=int), np.zeros((0, 3)),
+                    np.zeros((0, 32), dtype=np.uint8))
+        if anchor_kfs is None:
+            ids = np.arange(len(self._positions))
+        else:
+            wanted = set(anchor_kfs)
+            ids = np.array([i for i, kf in enumerate(self._anchor_kf) if kf in wanted],
+                           dtype=int)
+            if len(ids) == 0:
+                return (np.zeros(0, dtype=int), np.zeros((0, 3)),
+                        np.zeros((0, self._descriptors[0].shape[0]),
+                                 dtype=self._descriptors[0].dtype))
+        return (ids,
+                np.stack([self._positions[i] for i in ids]),
+                np.stack([self._descriptors[i] for i in ids]))
+
+    def observations(self, kf_ids: Iterable[int]
+                     ) -> List[Tuple[int, int, np.ndarray]]:
+        """[(kf_id, point_id, píxel), ...] de los keyframes pedidos (para BA)."""
+        out = []
+        for kf in kf_ids:
+            for pid, uv in self._obs.get(kf, []):
+                out.append((kf, pid, uv))
+        return out
+
+    def keyframe_pose(self, kf_id: int) -> np.ndarray:
+        return self._kf_poses[kf_id].copy()
+
+    def point_positions(self, ids: Iterable[int]) -> Dict[int, np.ndarray]:
+        return {int(i): self._positions[i].copy() for i in ids}
 
     def __len__(self) -> int:
         return len(self._positions)
+
+    # ── escritura de resultados del backend (BA / grafo de poses) ────────────
+
+    def set_keyframe_pose(self, kf_id: int, T_w_c: np.ndarray) -> None:
+        """Sobrescribe la pose (resultado del BA — que optimiza poses
+        directamente, a diferencia de update_poses que re-ancla por delta)."""
+        self._kf_poses[kf_id] = np.asarray(T_w_c, dtype=float).copy()
+
+    def set_point_positions(self, positions: Dict[int, np.ndarray]) -> None:
+        """Sobrescribe posiciones de puntos refinadas por el BA."""
+        for pid, p in positions.items():
+            self._positions[pid] = np.asarray(p, dtype=np.float64).copy()
+
+    def apply_similarity(self, kf_ids: Iterable[int], s: float,
+                         R: np.ndarray, t: np.ndarray) -> None:
+        """Aplica una SIMILITUD (escala + rotación + traslación) a un
+        segmento del mapa: poses de esos keyframes y sus puntos anclados.
+
+        Es la corrección de los cierres de bucle MONOCULARES: la deriva
+        incluye escala, y una corrección rígida (SE(3)) no puede absorberla
+        (lo medimos: 14% de deriva de escala sin BA; el grafo SE(3) solo
+        EMPEORABA las cosas). Puntos: p' = s·R·p + t. Poses: la orientación
+        rota (R·R_kf) y la posición se transforma como un punto — la escala
+        NO entra al bloque de rotación (las poses siguen en SE(3); es el
+        MAPA el que cambia de escala, y con él, todo PnP posterior).
+        """
+        wanted = set(kf_ids)
+        for kf_id in wanted:
+            T = self._kf_poses.get(kf_id)
+            if T is None:
+                continue
+            T2 = np.eye(4)
+            T2[:3, :3] = R @ T[:3, :3]
+            T2[:3, 3] = s * (R @ T[:3, 3]) + t
+            self._kf_poses[kf_id] = T2
+        for i, anchor in enumerate(self._anchor_kf):
+            if anchor in wanted:
+                self._positions[i] = s * (R @ self._positions[i]) + t
 
     # ── contrato MapperBase ───────────────────────────────────────────────────
 
@@ -89,7 +169,9 @@ class SparsePointMapper(MapperBase):
 
     def get_map(self) -> np.ndarray:
         """Nube de puntos (M, 3) en el frame del mundo."""
-        return self.snapshot()[0]
+        if not self._positions:
+            return np.zeros((0, 3))
+        return np.stack(self._positions)
 
     # ── exportación ───────────────────────────────────────────────────────────
 
