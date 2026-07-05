@@ -114,3 +114,92 @@ def se3_log(T: np.ndarray) -> np.ndarray:
     omega = so3_log(T[:3, :3])
     rho = np.linalg.solve(_left_jacobian(omega), T[:3, 3])
     return np.concatenate([rho, omega])
+
+
+# ═══════════════════════════ Sim(3): similitudes ═════════════════════════════
+# El grupo de las SIMILITUDES rígidas: S = [[s·R, t], [0, 1]], que actúa como
+# x' = s·R·x + t. Es el grupo natural del SLAM MONOCULAR: como la escala es
+# inobservable, la deriva vive en 7 grados de libertad (no 6), y un cierre de
+# bucle solo puede redistribuirla si el grafo de poses optimiza en Sim(3)
+# (Strasdat et al., "Scale Drift-Aware Large Scale Monocular SLAM", RSS 2010 —
+# lo comprobamos empíricamente en v0.35: el grafo SE(3) EMPEORABA el ATE con
+# 14% de deriva de escala).
+#
+# ─── La matemática ───
+# Álgebra: ξ = [ρ, ω, λ] ∈ ℝ⁷ (traslación, rotación, log-escala), con
+# representación matricial  ξ^ = [[λ·I + [ω]_×, ρ], [0, 0]]  (4×4). Como λ·I
+# conmuta con [ω]_×, la exponencial del bloque superior factoriza:
+#
+#     exp(λ·I + [ω]_×) = e^λ · Exp_SO3(ω) = s·R
+#
+# y la traslación es t = W·ρ, donde W = ∫₀¹ exp(u·(λI + [ω]_×)) du generaliza
+# la V de SE(3) acoplando giro Y escala al avance:
+#
+#     W = A·[ω]_× + B·[ω]_×² + C·I
+#
+# con coeficientes que degeneran suavemente a los de SE(3) cuando λ → 0
+# (C → 1) y al caso euclidiano cuando además θ → 0 (A → ½, B → ⅙). Las
+# cuatro ramas de Taylor están en _sim3_W; el test del repo las valida contra
+# la exponencial de matrices por serie (la verdad numérica sin fórmulas).
+
+
+def _sim3_W(omega: np.ndarray, lam: float) -> np.ndarray:
+    """W(ω, λ) = ∫₀¹ exp(u·(λI + [ω]ₓ)) du — el acoplador de Sim(3)."""
+    theta = np.linalg.norm(omega)
+    Wx = hat(omega)
+    s = np.exp(lam)
+    if abs(lam) < _EPS:
+        C = 1.0
+        if theta < _EPS:
+            A, B = 0.5, 1.0 / 6.0
+        else:
+            A = (1.0 - np.cos(theta)) / theta ** 2
+            B = (theta - np.sin(theta)) / theta ** 3
+    else:
+        C = (s - 1.0) / lam
+        if theta < _EPS:
+            A = ((lam - 1.0) * s + 1.0) / lam ** 2
+            B = (s * (0.5 * lam ** 2 - lam + 1.0) - 1.0) / lam ** 3
+        else:
+            a = s * np.sin(theta)
+            b = s * np.cos(theta)
+            c = theta ** 2 + lam ** 2
+            A = (a * lam + (1.0 - b) * theta) / (theta * c)
+            B = (C - ((b - 1.0) * lam + a * theta) / c) / theta ** 2
+    return A * Wx + B * (Wx @ Wx) + C * np.eye(3)
+
+
+def sim3_exp(xi: np.ndarray) -> np.ndarray:
+    """Exp de Sim(3): ξ = [ρ, ω, λ] (7,) → matriz 4x4 [[e^λ·R, W·ρ], [0, 1]]."""
+    rho, omega, lam = np.asarray(xi[:3], float), np.asarray(xi[3:6], float), float(xi[6])
+    S = np.eye(4)
+    S[:3, :3] = np.exp(lam) * so3_exp(omega)
+    S[:3, 3] = _sim3_W(omega, lam) @ rho
+    return S
+
+
+def sim3_log(S: np.ndarray) -> np.ndarray:
+    """Log de Sim(3): matriz 4x4 → ξ = [ρ, ω, λ] (7,).
+
+    La escala se extrae del determinante (det(s·R) = s³ porque det R = 1),
+    y ρ resolviendo W·ρ = t (mismo truco de estabilidad que en se3_log).
+    """
+    sR = S[:3, :3]
+    s = np.linalg.det(sR) ** (1.0 / 3.0)
+    lam = np.log(s)
+    omega = so3_log(sR / s)
+    rho = np.linalg.solve(_sim3_W(omega, lam), S[:3, 3])
+    return np.concatenate([rho, omega, [lam]])
+
+
+def sim3_inv(S: np.ndarray) -> np.ndarray:
+    """Inversa cerrada: si x' = s·R·x + t, entonces x = (1/s)·Rᵀ·(x' − t).
+
+    ⇒  S⁻¹ = [[(1/s)·Rᵀ, −(1/s)·Rᵀ·t], [0, 1]]
+    """
+    sR, t = S[:3, :3], S[:3, 3]
+    s2 = np.linalg.det(sR) ** (2.0 / 3.0)      # s², para invertir s·R de golpe
+    Si = np.eye(4)
+    Si[:3, :3] = sR.T / s2                      # (s·R)ᵀ/s² = (1/s)·Rᵀ
+    Si[:3, 3] = -(Si[:3, :3] @ t)
+    return Si

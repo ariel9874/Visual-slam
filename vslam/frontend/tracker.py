@@ -38,6 +38,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from vslam.backend.bundle_adjustment import local_bundle_adjustment
+from vslam.backend.pose_graph import GaussNewtonPoseGraph
 from vslam.core.camera import PinholeCamera
 from vslam.core.frame import Frame
 from vslam.core.geometry import invert_se3, solve_pnp, triangulate_two_views
@@ -327,11 +328,27 @@ class PnPTracker(TrackerBase):
 
     # ── fase 2: tracking 3D-2D ────────────────────────────────────────────────
 
+    def _local_kfs(self) -> Optional[list]:
+        """El mapa local (v0.4): keyframes recientes ∪ COVISIBLES del último.
+
+        La recencia da continuidad; la covisibilidad re-incorpora los
+        keyframes antiguos cuando se re-visita su zona (y con ellos, sus
+        puntos: el matching los asocia en lugar de re-triangular duplicados).
+        El puente entre segmentos lo tiende el cierre de bucle, que registra
+        sus pares verificados como observaciones del keyframe actual.
+        """
+        if self.local_window is None:
+            return None
+        recent = self._kf_ids[-self.local_window:]
+        if not recent:
+            return recent
+        covis = self.mapper.covisible_kfs(recent[-1])
+        return sorted(set(recent) | set(covis))
+
     def _track_step(self, gray, kps, desc, info) -> None:
         info["state"] = "TRACK"
-        # Mapa global (v0.2) o LOCAL (últimos N keyframes): ver __init__.
-        window = None if self.local_window is None else self._kf_ids[-self.local_window:]
-        ids, map_pts, map_desc = self.mapper.snapshot(window)
+        # Mapa global (v0.2) o LOCAL por recencia+covisibilidad (v0.4).
+        ids, map_pts, map_desc = self.mapper.snapshot(self._local_kfs())
 
         # Matching descriptores del MAPA (query) contra el frame (train).
         matches = self.matcher.match(map_desc, desc, None, kps, gray.shape)
@@ -347,6 +364,16 @@ class PnPTracker(TrackerBase):
         if T_w_c is None or inlier_mask.sum() < self.MIN_PNP_INLIERS:
             self._coast(info)
             return
+
+        # NOTA (compuerta de movimiento, probada y RETIRADA — v0.4): rechazar
+        # poses que salten mucho respecto al movimiento reciente suena bien,
+        # pero medimos que corta por ambos lados: bloquea los teletransportes
+        # falsos Y las recuperaciones legítimas tras un tramo de deriva (ATE
+        # 8.4 → 37.7 cm solo por la compuerta). Solo tiene sentido emparejada
+        # con RELOCALIZACIÓN (que decide a cuál modo volver); hasta entonces,
+        # el ataque correcto a los saltos es eliminar su causa: los puntos
+        # duplicados del mapa (ver el filtro anti-duplicados en
+        # _insert_keyframe).
 
         # Pose absoluta contra el mapa: no se apila sobre la anterior.
         self._T_rel = invert_se3(self._T_prev) @ T_w_c
@@ -401,6 +428,26 @@ class PnPTracker(TrackerBase):
             # heredan la escala automáticamente (no se re-normaliza nada).
             points_w, valid = triangulate_two_views(
                 self.camera, kf["T"], self.T_w_c, pts0, pts1)
+            # FILTRO ANTI-DUPLICADOS (v0.4): si el candidato cae a < 1.5% de
+            # su profundidad de un punto YA existente, es (casi seguro) la
+            # misma característica física re-triangulada — típico al re-visitar
+            # una zona: el matching al mapa falla para algunos keypoints y sin
+            # este filtro nacen nubes duplicadas desplazadas por la deriva,
+            # que vuelven BIESTABLE al PnP (medido: teleports de 0.25 u con
+            # cientos de "inliers" coherentes del modo falso). Se descarta la
+            # CREACIÓN, no se asocia: descartar no puede inventar observaciones
+            # falsas (la fusión por proyección que probamos sí podía — en
+            # textura densa los descriptores vecinos están correlacionados y
+            # envenenaba el BA: ATE 8 → 202 cm).
+            if valid.any():
+                _, map_pts, _ = self.mapper.snapshot(self._local_kfs())
+                if len(map_pts):
+                    cam = self.T_w_c[:3, 3]
+                    for n in np.flatnonzero(valid):
+                        d_min = np.min(np.linalg.norm(map_pts - points_w[n], axis=1))
+                        depth = np.linalg.norm(points_w[n] - cam)
+                        if d_min < 0.015 * depth:
+                            valid[n] = False
             if valid.any():
                 idx_curr = np.array([m.trainIdx for m in fresh])[valid]
                 ids = self.mapper.add_points(points_w[valid], desc[idx_curr],
@@ -483,24 +530,17 @@ class PnPTracker(TrackerBase):
            candidato: si converge con muchos inliers, da además la pose
            actual EXPRESADA EN EL MARCO DEL SEGMENTO ANTIGUO — la medición
            del bucle.
-        3. CORRECCIÓN tipo relocalización, con ESCALA (la lección monocular
-           dura, medida en este repo): la deriva monocular incluye escala
-           (14% sin BA local) y una corrección rígida SE(3) no puede
-           absorberla — reparte la inconsistencia como error de traslación y
-           EMPEORA el resultado (medido: ATE 35.9 → 94.1 cm). Es el motivo
-           por el que ORB-SLAM cierra bucles monoculares en Sim(3) (Strasdat
-           et al., RSS 2010). La versión mínima implementada aquí: los
-           puntos vistos por ambos segmentos existen DOS veces en el mapa
-           (gauge viejo y gauge derivado); la similitud (s, R, t) que casa
-           esas dos nubes (Umeyama, la matemática de vslam/evaluation.py)
-           re-alinea y RE-ESCALA la ventana local sobre el mapa antiguo. A
-           partir de ahí el tracking continúa en el gauge original.
-
-           Lo que NO se hace (todavía): redistribuir la corrección hacia
-           atrás por la cadena. Eso exige un grafo de poses Sim(3) (7 gdl
-           por nodo) — nuestro grafo SE(3) de backend/pose_graph.py lo
-           probamos aquí y, con deriva de escala, empeoraba las cosas.
-           Queda en la hoja de ruta (v0.4) con su propia álgebra en lie.py.
+        3. CORRECCIÓN por grafo de poses Sim(3) (v0.4): la deriva monocular
+           incluye ESCALA (14% medido sin BA local) y una corrección SE(3)
+           no puede absorberla — reparte la inconsistencia como error de
+           traslación y EMPEORA el resultado (medido: ATE 35.9 → 94.1 cm en
+           v0.35). Es el motivo por el que ORB-SLAM cierra bucles monoculares
+           en Sim(3) (Strasdat et al., RSS 2010) — reproducido en
+           tests/test_pose_graph.py. El factor de bucle lleva DOS mediciones:
+           la pose por PnP (rotación/traslación en el gauge antiguo) y la
+           escala relativa por Umeyama sobre los puntos que existen dos veces
+           en el mapa (uno por segmento). El grafo distribuye pose Y escala
+           por la cadena, y update_poses_sim3 re-ancla/re-escala el mapa.
         """
         if self._frame_idx - self._last_loop_frame < self.LOOP_COOLDOWN:
             return
@@ -542,25 +582,58 @@ class PnPTracker(TrackerBase):
                   for kp, pid_old in loop_by_kp.items()
                   if kp in self._kf["mp"] and self._kf["mp"][kp] != pid_old]
 
-        segment = (self._kf_ids[-self.local_window:] if self.local_window
-                   else [k for k in self._kf_ids if k > old["id"]])
         if len(shared) >= 10:
             from vslam.evaluation import umeyama_alignment
             pos_new = self.mapper.point_positions(pid for pid, _ in shared)
             pos_old = self.mapper.point_positions(pid for _, pid in shared)
             X_new = np.array([pos_new[pid] for pid, _ in shared])
             X_old = np.array([pos_old[pid] for _, pid in shared])
-            s, R_u, t_u = umeyama_alignment(X_new, X_old)   # nuevo → viejo
+            s_rel, _, _ = umeyama_alignment(X_new, X_old)   # escala nuevo→viejo
         else:
-            # Sin nube compartida suficiente: corrección rígida que lleva la
-            # pose actual exactamente a la medición del bucle (sin escala).
-            delta = T_loop @ invert_se3(self.T_w_c)
-            s, R_u, t_u = 1.0, delta[:3, :3], delta[:3, 3]
-        self.mapper.apply_similarity(segment, s, R_u, t_u)
+            s_rel = 1.0     # sin nube compartida: asumir bucle rígido
 
+        # Grafo Sim(3) sobre TODOS los keyframes (v0.4): la corrección — con
+        # su componente de escala — se redistribuye por la cadena en lugar de
+        # aplicarse como salto (validado en tests/test_pose_graph.py con el
+        # experimento de Strasdat: SE(3) no puede, Sim(3) sí). Los nodos
+        # entran como SE(3) embebida (s = 1); la odometría asegura suavidad
+        # de escala entre vecinos; el factor de bucle asegura la pose medida
+        # por PnP Y la escala medida por Umeyama.
+        poses = {k: self.mapper.keyframe_pose(k) for k in self._kf_ids}
+        graph = GaussNewtonPoseGraph("sim3")
+        # TODO el segmento antiguo queda FIJO (≤ keyframe del bucle): el
+        # cierre corrige al recién llegado, no reescribe el mundo — mover la
+        # referencia dejaría la historia ya emitida en otro marco (medido:
+        # con solo el nodo 0 fijo, el ATE con BA empeoraba de 6.7 a 87 cm).
+        for k in self._kf_ids:
+            graph.add_pose(k, poses[k], fixed=(k <= old["id"]))
+        for a, b in zip(self._kf_ids[:-1], self._kf_ids[1:]):
+            graph.add_odometry_factor(a, b, invert_se3(poses[a]) @ poses[b],
+                                      np.eye(7) * 1e2)
+        S_cur_meas = np.eye(4)
+        S_cur_meas[:3, :3] = s_rel * T_loop[:3, :3]
+        S_cur_meas[:3, 3] = T_loop[:3, 3]
+        graph.add_loop_factor(old["id"], cur_id,
+                              invert_se3(poses[old["id"]]) @ S_cur_meas,
+                              np.eye(7) * 1e4)
+
+        optimized = graph.optimize(iterations=20)
+        self.mapper.update_poses_sim3(optimized)     # re-ancla y RE-ESCALA
         self.T_w_c = self.mapper.keyframe_pose(cur_id)
         self._T_prev = self.T_w_c.copy()
         self._kf["T"] = self.T_w_c.copy()
+
+        # EL PUENTE DE COVISIBILIDAD: los pares verificados del bucle se
+        # registran como observaciones del keyframe actual → a partir de aquí
+        # los keyframes ANTIGUOS de esta zona son covisibles, sus puntos
+        # entran al mapa local, y el tracking re-usa la geometría original en
+        # lugar de duplicarla (la causa medida del PnP biestable).
+        bridge = [(pid, kp) for (pid, kp), ok in zip(pairs, inliers) if ok]
+        self.mapper.add_observations(
+            cur_id, [pid for pid, _ in bridge],
+            np.float64([kps[kp].pt for _, kp in bridge]))
+        for kp, pid in loop_by_kp.items():
+            self._kf["mp"].setdefault(kp, pid)
 
         self._last_loop_frame = self._frame_idx
         self.loop_events.append((self._frame_idx, old["id"]))

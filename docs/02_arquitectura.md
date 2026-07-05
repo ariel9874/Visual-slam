@@ -40,6 +40,7 @@ Visual-slam/
 │   │   ├── camera.py               #   PinholeCamera: intrínsecos K, proyección
 │   │   ├── frame.py                #   Frame/Keyframe: imagen + características + pose T_w_c
 │   │   ├── geometry.py             #   SE(3), triangulación DLT + filtros, PnP robusto
+│   │   ├── lie.py                  #   Exp/Log de SO(3), SE(3) y Sim(3) (7 gdl, monocular)
 │   │   ├── lie.py                  #   Álgebra de Lie: Exp/Log de SO(3) y SE(3) (v0.3)
 │   │   └── trajectory.py           #   Trayectoria + exportación formato TUM (evaluación)
 │   │

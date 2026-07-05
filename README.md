@@ -19,6 +19,7 @@ Repositorio de **Visual SLAM (vSLAM)** con doble propósito:
 | [docs/01_estado_del_arte.md](docs/01_estado_del_arte.md) | Investigación comparativa: métodos clásicos (ORB-SLAM3, DSO), deep learning (DROID-SLAM, TartanVO) y mapeo de nueva generación (NeRF-SLAM, 3DGS-SLAM). |
 | [docs/02_arquitectura.md](docs/02_arquitectura.md) | Diseño del repositorio: contratos de datos, módulos intercambiables, estrategia C++/Python y plan de integración con ROS 2. |
 | [docs/03_detectores_y_matchers.md](docs/03_detectores_y_matchers.md) | Catálogo razonado de 12 detectores y 6 matchers (clásicos y aprendidos): idea matemática, costos y guía de selección. |
+| [docs/04_hoja_de_ruta_v1.md](docs/04_hoja_de_ruta_v1.md) | El plan completo hacia v1.0: etapas, criterios de aceptación medibles, riesgos y lo que deliberadamente queda fuera. |
 
 ## Estructura
 
@@ -96,9 +97,17 @@ Cada bloque del ejemplo indica a qué módulo de `vslam/` corresponde en la arqu
 - [x] **v0.2** — Triangulación (DLT) + tracking 3D-2D (PnP) contra mapa disperso persistente, con keyframes e inicialización validada por tercera vista ([vslam/frontend/tracker.py](vslam/frontend/tracker.py)). En la secuencia sintética: ATE 0.2 cm con SIFT (vs 4.8 cm del 2D-2D).
 - [x] **v0.3** — Backend real: álgebra de Lie SE(3) ([vslam/core/lie.py](vslam/core/lie.py)) + optimizador de grafo de poses en NumPy puro (Gauss-Newton/LM con kernel Huber, [vslam/backend/pose_graph.py](vslam/backend/pose_graph.py)) + demo de cierre de bucle con re-anclaje del mapa ([examples/03_pose_graph_loop.py](examples/03_pose_graph_loop.py)): ATE 1.09 m → 0.05 m con un solo factor de bucle.
 - [x] **v0.35** — Backend integrado al tracker: **BA local** con jacobianos analíticos y complemento de Schur ([vslam/backend/bundle_adjustment.py](vslam/backend/bundle_adjustment.py)) — ORB pasa de 6.9 a **2.6 cm** de ATE; **mapa local** (costo acotado), keyframes con intervalo máximo y piso de salud, y **cierre de bucle visual** (reconocimiento de lugar + verificación PnP + corrección de similitud CON escala, [examples/04_loop_closure.py](examples/04_loop_closure.py)): 8.4 → 6.7 cm en la secuencia de corredor con re-visita.
-- [ ] **v0.4** — Grafo de poses **Sim(3)** (distribuir también la escala por la cadena — la lección medida de v0.35), culling/fusión de puntos del mapa, adaptador GTSAM (Linux/conda: no hay wheel de Windows en PyPI), y núcleo C++ del frontend (KLT/ORB) con pybind11.
-- [ ] **v0.5** — Mapper de Gaussian Splatting (rasterizador diferenciable) detrás de la interfaz `MapperBase`.
-- [ ] **v0.6** — Nodos ROS 2 (frontend/backend/mapper como lifecycle nodes componibles).
+- [x] **v0.4a** — Consistencia: álgebra **Sim(3)** ([vslam/core/lie.py](vslam/core/lie.py)) + grafo de poses genérico por grupo (el experimento de Strasdat reproducido en tests: la deriva de escala que SE(3) no puede corregir), **mapa local por covisibilidad** — el gran salto: el corredor con re-visita pasa de 8.4 a **2.2 cm** (criterio de v0.4 cumplido) — filtro anti-duplicados y cierre de bucle Sim(3) con puente de covisibilidad.
+- [ ] **v0.4b** — Relocalización (recuperación de secuestro), culling de puntos, adaptador GTSAM.
+- [ ] **v0.45** — Datos reales: loaders TUM/EuRoC/KITTI, modelo de distorsión, benchmark batch + CI.
+- [ ] **v0.5** — Tiempo real: núcleo C++ (pybind11) + adaptador GTSAM/iSAM2.
+- [ ] **v0.6** — RGB-D y estéreo: escala métrica real.
+- [ ] **v0.7** — La tesis cumplida: `GaussianSplattingMapper` asíncrono detrás de `MapperBase`.
+- [ ] **v0.8** — ROS 2 (lifecycle nodes componibles, demo con rosbag y cámara real).
+- [ ] **v0.9 → v1.0** — Endurecimiento, congelación de API, PyPI y benchmarks publicados.
+
+El plan detallado — con criterios de aceptación medibles por etapa, riesgos y lo que
+deliberadamente queda fuera de 1.0 — está en [docs/04_hoja_de_ruta_v1.md](docs/04_hoja_de_ruta_v1.md).
 
 ## Próximos pasos administrativos
 

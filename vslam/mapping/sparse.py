@@ -107,6 +107,28 @@ class SparsePointMapper(MapperBase):
     def keyframe_pose(self, kf_id: int) -> np.ndarray:
         return self._kf_poses[kf_id].copy()
 
+    def covisible_kfs(self, kf_id: int, min_shared: int = 15) -> List[int]:
+        """Keyframes que comparten ≥ min_shared puntos observados con kf_id.
+
+        Es el GRAFO DE COVISIBILIDAD (ORB-SLAM): define el "mapa local"
+        correcto — no los keyframes recientes en el TIEMPO, sino los que ven
+        el mismo LUGAR. La diferencia importa al re-visitar: con recencia,
+        los puntos antiguos de la zona quedan fuera del matching y la misma
+        característica física se re-triangula duplicada (medido: PnP
+        biestable con teleports); con covisibilidad, re-entran solos.
+        """
+        mine = {pid for pid, _ in self._obs.get(kf_id, [])}
+        if not mine:
+            return []
+        out = []
+        for other, entries in self._obs.items():
+            if other == kf_id:
+                continue
+            shared = sum(1 for pid, _ in entries if pid in mine)
+            if shared >= min_shared:
+                out.append(other)
+        return out
+
     def point_positions(self, ids: Iterable[int]) -> Dict[int, np.ndarray]:
         return {int(i): self._positions[i].copy() for i in ids}
 
@@ -152,6 +174,32 @@ class SparsePointMapper(MapperBase):
                 self._positions[i] = s * (R @ self._positions[i]) + t
 
     # ── contrato MapperBase ───────────────────────────────────────────────────
+
+    def update_poses_sim3(self, optimized: Dict[int, np.ndarray]) -> None:
+        """Versión Sim(3) de update_poses (cierres de bucle monoculares, v0.4).
+
+        El backend corrigió los keyframes con SIMILITUDES [[s·R, t], [0, 1]]:
+        el delta por keyframe incluye ESCALA y se aplica íntegro a sus puntos
+        (el bloque superior del delta ya es s·R, así que la acción matricial
+        re-escala sola). La pose almacenada se re-normaliza a SE(3): la
+        escala vive en el MAPA, no en la pose — la misma convención que
+        apply_similarity, ahora distribuida nodo a nodo por el grafo.
+        """
+        deltas = {}
+        for kf_id, S_new in optimized.items():
+            T_old = self._kf_poses.get(kf_id)
+            if T_old is None:
+                continue
+            deltas[kf_id] = S_new @ invert_se3(T_old)   # T_old es rígida
+            s = np.linalg.det(S_new[:3, :3]) ** (1.0 / 3.0)
+            T2 = np.eye(4)
+            T2[:3, :3] = S_new[:3, :3] / s
+            T2[:3, 3] = S_new[:3, 3]
+            self._kf_poses[kf_id] = T2
+        for i, kf_id in enumerate(self._anchor_kf):
+            d = deltas.get(kf_id)
+            if d is not None:
+                self._positions[i] = d[:3, :3] @ self._positions[i] + d[:3, 3]
 
     def update_poses(self, optimized_poses: Dict[int, np.ndarray]) -> None:
         """Re-ancla los puntos cuyos keyframes fueron corregidos (fórmula arriba)."""

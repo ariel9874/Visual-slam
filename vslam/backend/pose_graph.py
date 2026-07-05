@@ -48,16 +48,51 @@ import numpy as np
 
 from vslam.backend.factor_graph import FactorGraphBackend
 from vslam.core.geometry import invert_se3
-from vslam.core.lie import se3_exp, se3_log
+from vslam.core.lie import se3_exp, se3_log, sim3_exp, sim3_inv, sim3_log
+
+
+class _SE3Ops:
+    """Operaciones de grupo para poses rígidas (6 gdl)."""
+    DIM = 6
+    exp = staticmethod(se3_exp)
+    log = staticmethod(se3_log)
+    inv = staticmethod(invert_se3)
+
+
+class _Sim3Ops:
+    """Operaciones de grupo para similitudes (7 gdl: + escala).
+
+    El grupo correcto para bucles MONOCULARES: la deriva de escala es un
+    grado de libertad más que redistribuir (lie.py, bloque Sim(3)).
+    """
+    DIM = 7
+    exp = staticmethod(sim3_exp)
+    log = staticmethod(sim3_log)
+    inv = staticmethod(sim3_inv)
+
+
+_GROUPS = {"se3": _SE3Ops, "sim3": _Sim3Ops}
 
 
 class GaussNewtonPoseGraph(FactorGraphBackend):
-    """Backend de grafo de poses: NumPy + jacobianos numéricos + LM."""
+    """Backend de grafo de poses: NumPy + jacobianos numéricos + LM.
+
+    Genérico en el GRUPO: `group="se3"` (rígido, default) o `group="sim3"`
+    (similitudes — poses 4x4 con bloque s·R; las medidas y la información
+    pasan a ser de 7 dimensiones). Todo el mecanismo (whitening, LM, Huber,
+    gauge) es idéntico: la única diferencia es en qué variedad viven los
+    nodos — esa es la gracia de haber escrito el optimizador sobre Exp/Log.
+    """
 
     HUBER_DELTA = 1.0     # umbral (residuo blanqueado) del kernel robusto
     JACOBIAN_EPS = 1e-6   # paso de las diferencias finitas
 
-    def __init__(self) -> None:
+    def __init__(self, group: str = "se3") -> None:
+        try:
+            self._ops = _GROUPS[group]
+        except KeyError:
+            raise ValueError(f"Grupo desconocido: {group!r}. "
+                             f"Disponibles: {', '.join(_GROUPS)}") from None
         self._poses: Dict[int, np.ndarray] = {}
         self._fixed: set = set()
         self._edges: List[dict] = []
@@ -78,10 +113,14 @@ class GaussNewtonPoseGraph(FactorGraphBackend):
         self._add_edge(id_from, id_to, T_rel, information, robust=True)
 
     def _add_edge(self, i, j, T_rel, information, robust) -> None:
-        L = np.linalg.cholesky(np.asarray(information, dtype=float)).T  # Λ = LᵀL
+        info = np.asarray(information, dtype=float)
+        if info.shape != (self._ops.DIM, self._ops.DIM):
+            raise ValueError(f"La información debe ser {self._ops.DIM}x"
+                             f"{self._ops.DIM} para este grupo; llegó {info.shape}")
+        L = np.linalg.cholesky(info).T                              # Λ = LᵀL
         self._edges.append({
             "i": i, "j": j,
-            "T_meas_inv": invert_se3(np.asarray(T_rel, dtype=float)),
+            "T_meas_inv": self._ops.inv(np.asarray(T_rel, dtype=float)),
             "sqrt_info": L,
             "robust": robust,
         })
@@ -90,24 +129,26 @@ class GaussNewtonPoseGraph(FactorGraphBackend):
 
     def _residual(self, edge, poses) -> np.ndarray:
         """r = L · Log( T̂_ij⁻¹ · T_i⁻¹ · T_j )  (blanqueado)."""
-        e = se3_log(edge["T_meas_inv"] @ invert_se3(poses[edge["i"]]) @ poses[edge["j"]])
+        e = self._ops.log(edge["T_meas_inv"] @ self._ops.inv(poses[edge["i"]])
+                          @ poses[edge["j"]])
         return edge["sqrt_info"] @ e
 
     def optimize(self, iterations: int = 20) -> Dict[int, np.ndarray]:
+        D = self._ops.DIM
         poses = {k: v.copy() for k, v in self._poses.items()}
         if not self._fixed and poses:                 # gauge: anclar la primera
             self._fixed.add(min(poses))
         free = sorted(k for k in poses if k not in self._fixed)
-        index = {k: 6 * n for n, k in enumerate(free)}
-        n_vars = 6 * len(free)
+        index = {k: D * n for n, k in enumerate(free)}
+        n_vars = D * len(free)
         if n_vars == 0 or not self._edges:
             return poses
 
         lam = 1e-6
         cost = self._total_cost(poses)
         for _ in range(iterations):
-            J = np.zeros((6 * len(self._edges), n_vars))
-            r = np.zeros(6 * len(self._edges))
+            J = np.zeros((D * len(self._edges), n_vars))
+            r = np.zeros(D * len(self._edges))
 
             for k, edge in enumerate(self._edges):
                 rk = self._residual(edge, poses)
@@ -117,21 +158,21 @@ class GaussNewtonPoseGraph(FactorGraphBackend):
                     norm = np.linalg.norm(rk)
                     w = 1.0 if norm <= self.HUBER_DELTA else self.HUBER_DELTA / norm
                 sw = np.sqrt(w)
-                r[6 * k: 6 * k + 6] = sw * rk
+                r[D * k: D * k + D] = sw * rk
 
                 # Jacobiano numérico: perturbar cada pose implicada por la
-                # derecha en cada una de sus 6 direcciones tangentes.
+                # derecha en cada una de sus D direcciones tangentes.
                 for node in (edge["i"], edge["j"]):
                     if node not in index:
                         continue
                     col = index[node]
                     T_orig = poses[node]
-                    for d in range(6):
-                        delta = np.zeros(6)
+                    for d in range(D):
+                        delta = np.zeros(D)
                         delta[d] = self.JACOBIAN_EPS
-                        poses[node] = T_orig @ se3_exp(delta)
+                        poses[node] = T_orig @ self._ops.exp(delta)
                         rk_pert = self._residual(edge, poses)
-                        J[6 * k: 6 * k + 6, col + d] = sw * (rk_pert - rk) / self.JACOBIAN_EPS
+                        J[D * k: D * k + D, col + d] = sw * (rk_pert - rk) / self.JACOBIAN_EPS
                     poses[node] = T_orig
 
             # Paso LM:  (H + λ·diag(H)) δ = −Jᵀ r
@@ -141,7 +182,7 @@ class GaussNewtonPoseGraph(FactorGraphBackend):
 
             trial = {k: v.copy() for k, v in poses.items()}
             for node, col in index.items():
-                trial[node] = trial[node] @ se3_exp(delta[col: col + 6])
+                trial[node] = trial[node] @ self._ops.exp(delta[col: col + D])
             trial_cost = self._total_cost(trial)
 
             if trial_cost < cost:                     # mejora: aceptar y confiar más
