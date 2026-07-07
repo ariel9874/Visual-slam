@@ -30,15 +30,31 @@ La proyección DESTRUYE la profundidad: todos los puntos de la semirrecta
 Convenciones (fijadas para todo el repo, ver docs/02_arquitectura.md §4):
   - Ejes de cámara estilo OpenCV: +Z hacia delante, +X derecha, +Y abajo.
 
-En v0.1 asumimos imágenes ya rectificadas (sin distorsión radial/tangencial).
-Un modelo con distorsión (Brown-Conrady, Kannala-Brandt para fisheye) entrará
-como subclase cuando soportemos datasets crudos.
+─── La matemática: distorsión de lente (Brown-Conrady) ───────────────────────
+La proyección ideal de arriba asume una lente perfecta. Una lente real desvía
+el rayo: la radial (barril/cojín) crece con el radio, la tangencial nace de que
+el sensor no es perfectamente paralelo a la lente. El modelo estándar (el que
+usan TUM, KITTI, OpenCV) actúa sobre las coordenadas NORMALIZADAS antes de K:
+
+    r² = x_n² + y_n²
+    radial      = 1 + k1·r² + k2·r⁴ + k3·r⁶
+    x_d = x_n·radial + 2·p1·x_n·y_n + p2·(r² + 2·x_n²)      (tangencial)
+    y_d = y_n·radial + p1·(r² + 2·y_n²) + 2·p2·x_n·y_n
+    (u, v) = (fx·x_d + cx,  fy·y_d + cy)
+
+El SLAM geométrico (E, PnP, triangulación) vive en el modelo IDEAL: hay que
+DES-distorsionar los píxeles ANTES de tocar la geometría. Como la relación
+directa (x_n → x_d) no tiene inversa cerrada, `undistort_points` la resuelve
+numéricamente (Newton, vía cv2). Con distorsión nula es la identidad, así que
+el sintético (dist=0) pasa sin cambios — la geometría de v0.1-0.4 no se entera.
+──────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 
@@ -51,6 +67,10 @@ class PinholeCamera:
     cy: float
     width: int = 0   # 0 = desconocido (opcional para la geometría)
     height: int = 0
+    # Distorsión Brown-Conrady (k1, k2, p1, p2, k3); tupla para que el
+    # dataclass frozen siga siendo hashable (un ndarray no lo es). (0,)*5 = sin
+    # distorsión = identidad: el pipeline sintético no cambia.
+    distortion: Tuple[float, float, float, float, float] = (0.0, 0.0, 0.0, 0.0, 0.0)
 
     @property
     def K(self) -> np.ndarray:
@@ -61,6 +81,29 @@ class PinholeCamera:
              [0.0, 0.0, 1.0]],
             dtype=np.float64,
         )
+
+    @property
+    def dist(self) -> np.ndarray:
+        """Coeficientes de distorsión (5,) en el orden de OpenCV: k1 k2 p1 p2 k3."""
+        return np.array(self.distortion, dtype=np.float64)
+
+    @property
+    def has_distortion(self) -> bool:
+        return bool(np.any(self.dist != 0.0))
+
+    def undistort_points(self, pixels: np.ndarray) -> np.ndarray:
+        """Lleva píxeles DISTORSIONADOS al plano imagen ideal (píxeles sin
+        distorsión, en los mismos intrínsecos K). Es el puente entre un dataset
+        crudo y la geometría ideal del repo: llamarlo sobre los keypoints ANTES
+        de E/PnP/triangulación. Con dist=0 devuelve los píxeles intactos.
+        """
+        px = np.asarray(pixels, dtype=np.float64)
+        if not self.has_distortion or px.size == 0:
+            return px.reshape(-1, 2)
+        import cv2  # local: mantiene el módulo importable sin cv2 (docs/tests)
+        # P=K re-proyecta a píxeles (sin P, cv2 devolvería coords normalizadas).
+        und = cv2.undistortPoints(px.reshape(-1, 1, 2), self.K, self.dist, P=self.K)
+        return und.reshape(-1, 2)
 
     def project(self, points_cam: np.ndarray) -> np.ndarray:
         """Proyecta puntos 3D expresados en el frame de la cámara a píxeles.
@@ -86,7 +129,8 @@ class PinholeCamera:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "PinholeCamera":
-        """Carga calibración desde un .txt con una línea: ``fx fy cx cy [width height]``.
+        """Carga calibración desde un .txt con una línea:
+        ``fx fy cx cy [width height [k1 k2 p1 p2 k3]]``.
 
         Las líneas que empiezan con '#' se ignoran (comentarios).
         """
@@ -98,5 +142,7 @@ class PinholeCamera:
             if len(vals) < 4:
                 raise ValueError(f"Calibración inválida en {path}: se esperan al menos fx fy cx cy")
             w, h = (int(vals[4]), int(vals[5])) if len(vals) >= 6 else (0, 0)
-            return cls(fx=vals[0], fy=vals[1], cx=vals[2], cy=vals[3], width=w, height=h)
+            dist = tuple(vals[6:11]) if len(vals) >= 11 else (0.0,) * 5
+            return cls(fx=vals[0], fy=vals[1], cx=vals[2], cy=vals[3], width=w, height=h,
+                       distortion=dist)  # type: ignore[arg-type]
         raise ValueError(f"Archivo de calibración vacío: {path}")

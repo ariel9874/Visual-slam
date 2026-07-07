@@ -46,6 +46,11 @@ from vslam.frontend.features import create_extractor
 from vslam.frontend.matching import create_matcher
 from vslam.mapping.sparse import SparsePointMapper
 
+# Popcount por byte: Hamming(a, b) = Σ popcount(a XOR b) sobre los 32 bytes de
+# un descriptor ORB. Con esta tabla la distancia de un descriptor a un conjunto
+# es vectorizada (sin bucle Python) — la base del matching guiado (v0.45).
+_POPCOUNT8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint16)
+
 
 class TrackerBase(ABC):
     """Contrato: recibe frames, devuelve poses; decide keyframes."""
@@ -98,9 +103,16 @@ class PnPTracker(TrackerBase):
     KF_MAX_GAP = 15             # frames MÁXIMOS: insertar aunque no haya hambre
     KF_INLIER_RATIO = 0.6       # nuevo KF si inliers < 60% de los del último KF
     KF_MIN_INLIERS = 100        # ... o si caen de este absoluto
+    # Piso de salud para INSERTAR un keyframe (lección 8): un KF desde pose
+    # incierta triangula puntos basura. En sintético = 3×MIN_PNP_INLIERS (45),
+    # con tracking sano de 100-350 inliers. En datos reales el tracking sano
+    # ronda 20-52 inliers: 45 AHOGA el mapa (inanición de KFs → colapso, medido
+    # en fr2_desk frame 1565). Perilla de re-calibración por dataset (v0.45).
+    KF_HEALTH_INLIERS = 45
     CHEIRALITY_DIST_THRESH = 2000.0  # ver la "TRAMPA CLÁSICA" en examples/01
     BA_WINDOW = 5               # keyframes en la ventana del BA local
     BA_ITERATIONS = 6
+    GBA_ITERATIONS = 10         # iteraciones del BA global offline (v0.45)
     # ── cierre de bucle (v0.35) ──
     LOOP_TEMPORAL_GAP = 60      # frames mínimos de antigüedad del candidato
     LOOP_MIN_MATCHES = 200      # matches brutos para considerar un candidato
@@ -113,6 +125,10 @@ class PnPTracker(TrackerBase):
     GATE_MIN_SAMPLES = 20       # historial mínimo antes de activar la compuerta
     GATE_STEP_FACTOR = 6.0      # rechazar pasos > FACTOR × percentil 95 del historial
     GATE_HISTORY = 200          # ventana del historial de pasos aceptados
+    # ── matching guiado por reproyección (v0.45) ──
+    GUIDED_RADIUS_PX = 15.0     # ventana de búsqueda alrededor del punto proyectado
+    GUIDED_MAX_HAMMING = 64     # distancia ORB máxima aceptable (ORB-SLAM: TH_LOW 50)
+    GUIDED_MAX_L2 = 0.7         # ídem para descriptores float (SuperPoint, provisional)
 
     def __init__(self, camera: PinholeCamera, extractor=None, matcher=None,
                  mapper: Optional[SparsePointMapper] = None,
@@ -154,6 +170,7 @@ class PnPTracker(TrackerBase):
         self._frame_idx = -1
         self._coast_count = 0            # frames consecutivos en coast (v0.4b)
         self._step_history: list = []    # ||paso|| de poses aceptadas (compuerta)
+        self._local_ref_kf: Optional[int] = None  # ancla del mapa local tras reloc
 
         # Referencia de inicialización y último keyframe.
         self._ref: Optional[Tuple[list, np.ndarray]] = None   # (kps, desc)
@@ -168,6 +185,17 @@ class PnPTracker(TrackerBase):
         T, info = self.process_frame(frame.image)
         frame.T_w_c = T
         return T if info["tracked"] else None
+
+    def keyframe_trajectory(self) -> list:
+        """Trayectoria FINAL de keyframes: (frame_id, T_w_c) con las poses
+        OPTIMIZADAS del mapper (tras cierres de bucle + BA global).
+
+        Es la métrica estándar de un SLAM con cierre de bucle (la que reporta
+        ORB-SLAM): las poses ONLINE se emiten frame a frame ANTES de las
+        correcciones y no las reflejan — medir sobre ellas oculta todo el
+        beneficio del backend (medido en fr2_desk: online 22 cm vs final 2 cm).
+        """
+        return [(k, self.mapper.keyframe_pose(k)) for k in self._kf_ids]
 
     def process_frame(self, gray: np.ndarray) -> Tuple[np.ndarray, Dict]:
         """Procesa un frame; devuelve (T_w_c, info) — misma forma que el
@@ -351,18 +379,93 @@ class PnPTracker(TrackerBase):
         if self.local_window is None:
             return None
         recent = self._kf_ids[-self.local_window:]
-        if not recent:
-            return recent
-        covis = self.mapper.covisible_kfs(recent[-1])
-        return sorted(set(recent) | set(covis))
+        anchors = set(recent)
+        if recent:
+            anchors |= set(self.mapper.covisible_kfs(recent[-1]))
+        # Tras una RELOCALIZACIÓN, re-anclar el mapa local en el KF reconocido y
+        # su covisibilidad, no solo en la recencia temporal — que tras un salto
+        # apunta a la zona de ANTES del secuestro. Sin esto el tracking no puede
+        # continuar tras reloc (el mapa local no cubre dónde estamos): medido, el
+        # matching guiado lo destapó (el secuestro reincidía en coast/reloc). Se
+        # limpia al insertar el próximo keyframe (la recencia vuelve a valer).
+        if self._local_ref_kf is not None:
+            anchors.add(self._local_ref_kf)
+            anchors |= set(self.mapper.covisible_kfs(self._local_ref_kf))
+        return sorted(anchors)
+
+    @staticmethod
+    def _desc_distances(one: np.ndarray, many: np.ndarray) -> np.ndarray:
+        """Distancia de un descriptor a un conjunto (K,): Hamming si es binario
+        (ORB, vía la tabla de popcount), L2 si es float (SuperPoint)."""
+        if one.dtype == np.uint8:
+            xor = np.bitwise_xor(one[None, :], many)          # (K, 32)
+            return _POPCOUNT8[xor].sum(axis=1)
+        return np.linalg.norm(many.astype(np.float64) - one, axis=1)
+
+    def _guided_match(self, kps, desc, T_pred, map_pts, map_desc):
+        """Matching GUIADO por reproyección (v0.45): en vez de comparar todos
+        los descriptores contra todos, se PREDICE la pose (velocidad constante),
+        se proyecta el mapa local a la imagen y cada punto se busca solo entre
+        los keypoints dentro de un radio pequeño.
+
+        ─── La matemática / por qué gana ───
+        El matching global por descriptor ignora la geometría: en datos reales,
+        contra un mapa grande, produce muchas asociaciones ambiguas (ORB tiene
+        vecinos casuales a esa escala → 0 inliers, lección 22). Un prior de pose
+        —aunque sea burdo (constante)— restringe cada punto a una ventana de ~15
+        px: dentro de ella el vecino correcto casi no tiene rival, así que suben
+        los inliers verdaderos Y baja el ruido. Es el "track local map" de
+        ORB-SLAM. Asignación GREEDY por distancia ascendente: cada keypoint y
+        cada punto del mapa se usan una sola vez (evita correspondencias en
+        conflicto que envenenarían el PnP). Si el prior es malo (tras reloc o un
+        salto), el guiado rinde poco y el llamador cae al matching global.
+        """
+        cv2 = self._cv2
+        T_c_w = invert_se3(T_pred)
+        pc = (T_c_w[:3, :3] @ map_pts.T).T + T_c_w[:3, 3]      # mapa en cámara pred.
+        uv = self.camera.project(pc)                          # (M, 2)
+        kp_xy = np.array([kp.pt for kp in kps], dtype=np.float64)  # (N, 2)
+        h, w = (self.camera.height or 10 ** 9), (self.camera.width or 10 ** 9)
+        r2 = self.GUIDED_RADIUS_PX ** 2
+        max_dist = self.GUIDED_MAX_HAMMING if desc.dtype == np.uint8 else self.GUIDED_MAX_L2
+
+        cand_pairs = []      # (dist, idx_mapa, idx_kp)
+        visible = (pc[:, 2] > 1e-6) & (uv[:, 0] >= 0) & (uv[:, 0] < w) \
+            & (uv[:, 1] >= 0) & (uv[:, 1] < h)
+        for i in np.flatnonzero(visible):
+            near = np.flatnonzero(np.sum((kp_xy - uv[i]) ** 2, axis=1) <= r2)
+            if not len(near):
+                continue
+            dists = self._desc_distances(map_desc[i], desc[near])
+            k = int(np.argmin(dists))
+            if dists[k] <= max_dist:
+                cand_pairs.append((float(dists[k]), int(i), int(near[k])))
+
+        cand_pairs.sort()
+        used_kp, used_mp, out = set(), set(), []
+        for dist, i, j in cand_pairs:
+            if i in used_mp or j in used_kp:
+                continue
+            used_mp.add(i); used_kp.add(j)
+            out.append(cv2.DMatch(i, j, dist))
+        return out
 
     def _track_step(self, gray, kps, desc, info) -> None:
         info["state"] = "TRACK"
         # Mapa global (v0.2) o LOCAL por recencia+covisibilidad (v0.4).
         ids, map_pts, map_desc = self.mapper.snapshot(self._local_kfs())
 
-        # Matching descriptores del MAPA (query) contra el frame (train).
-        matches = self.matcher.match(map_desc, desc, None, kps, gray.shape)
+        # Matching GUIADO por reproyección (v0.45) si hay prior de movimiento;
+        # si rinde poco (tras reloc, salto, o al inicio), CAE al global por
+        # descriptor. El guiado sube los inliers reales en datos reales (lección
+        # 22) — la palanca contra la inanición de KFs y la deriva.
+        matches = []
+        if len(map_pts):
+            T_pred = self._T_prev @ self._T_rel
+            matches = self._guided_match(kps, desc, T_pred, map_pts, map_desc)
+        info["guided"] = len(matches)
+        if len(matches) < self.MIN_MAP_MATCHES:
+            matches = self.matcher.match(map_desc, desc, None, kps, gray.shape)
         info["n_matches"] = len(matches)
         if len(matches) < self.MIN_MAP_MATCHES:
             self._coast(gray, kps, desc, info)
@@ -426,7 +529,7 @@ class PnPTracker(TrackerBase):
         starving = (n_inliers < self.KF_INLIER_RATIO * self._kf_inliers
                     or n_inliers < self.KF_MIN_INLIERS)
         overdue = self._frames_since_kf >= self.KF_MAX_GAP
-        healthy = n_inliers >= 3 * self.MIN_PNP_INLIERS
+        healthy = n_inliers >= self.KF_HEALTH_INLIERS
         if self._frames_since_kf >= self.KF_MIN_GAP and healthy \
                 and (starving or overdue):
             # kp del frame → id GLOBAL del punto (ids traduce índices del
@@ -494,6 +597,7 @@ class PnPTracker(TrackerBase):
                 kf_id, list(mp.values()),
                 np.float64([kps[i].pt for i in kp_idx]))
         self._kf_ids.append(kf_id)
+        self._local_ref_kf = None        # un KF nuevo re-centra el mapa local por recencia
         self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
                     "T": self.T_w_c.copy()}
         self._kf_db.append({"id": kf_id, "kps": kps, "desc": desc, "mp": mp})
@@ -570,6 +674,51 @@ class PnPTracker(TrackerBase):
         img = np.float64([kps[t].pt for _, t in pairs])
         T_pnp, inliers = solve_pnp(self.camera, obj, img)
         return len(matches), pairs, T_pnp, inliers
+
+    def global_bundle_adjustment(self, iterations: Optional[int] = None) -> None:
+        """BUNDLE ADJUSTMENT GLOBAL: re-optimiza poses Y puntos de TODO el mapa
+        desde los residuos de reproyección (v0.45). Es un refinamiento OFFLINE:
+        el llamador lo invoca UNA vez tras procesar la secuencia, y luego lee
+        `keyframe_trajectory()` — no se ejecuta en caliente.
+
+        ─── Por qué OFFLINE y no tras cada bucle ───
+        Probado online (tras cada bucle grande): el BA global sobre un mapa
+        grande (~240 KFs, BA didáctico) sacude el mapa y descarrila el tracking
+        online — fr2_xyz pasó de 5 a 346 frames perdidos, ni el cooldown ni
+        re-anclar el mapa local lo salvaban (el problema es el BA a esa escala
+        corriendo repetido, no solo el salto de pose). Como solo evaluamos la
+        trayectoria FINAL de keyframes (lección 25), UN BA al final da el
+        beneficio sin tocar el tracking. Es el "full BA" offline de ORB-SLAM.
+
+        ─── Por qué hace falta ADEMÁS del grafo de poses del bucle ───
+        El grafo Sim(3) del cierre de bucle corrige POSES dadas las restricciones
+        relativas, pero deja los PUNTOS con su posición derivada y no re-estima
+        la escala intermedia desde las observaciones — la escala monocular seguía
+        divagando (fr2_desk: escala por cuartos 1.48/1.53/1.86/1.20). El BA global
+        optimiza puntos y poses juntos, y como el cierre de bucle registró las
+        OBSERVACIONES PUENTE (el KF actual ve puntos del segmento viejo), esas
+        observaciones ATAN los extremos del bucle → la corrección de escala se
+        reparte por la cadena. Medido en fr2_desk (trayectoria final): 4.8→2.0 cm.
+        Gauge: se fijan los 2 KFs más viejos (baseline → ancla escala, §BA).
+        """
+        kfs = list(self._kf_ids)
+        if len(kfs) < 3:
+            return
+        obs = self.mapper.observations(kfs)
+        if len(obs) < 60:
+            return
+        kf_poses = {k: self.mapper.keyframe_pose(k) for k in kfs}
+        counts: dict = {}
+        for _, pid, _ in obs:
+            counts[pid] = counts.get(pid, 0) + 1
+        points = self.mapper.point_positions(
+            {pid for pid, c in counts.items() if c >= 2})
+        opt_poses, opt_points = local_bundle_adjustment(
+            self.camera, kf_poses, points, obs, fixed_kfs=set(kfs[:2]),
+            iterations=iterations or self.GBA_ITERATIONS)
+        for k, T in opt_poses.items():
+            self.mapper.set_keyframe_pose(k, T)
+        self.mapper.set_point_positions(opt_points)
 
     def _try_close_loop(self, gray, kps, desc, info) -> None:
         """Cierre de bucle en tres actos (el pipeline canónico del SLAM):
@@ -748,6 +897,7 @@ class PnPTracker(TrackerBase):
         self._T_prev = T_pnp.copy()
         self._T_rel = np.eye(4)
         self._coast_count = 0
+        self._local_ref_kf = old_id      # re-ancla el mapa local aquí (ver _local_kfs)
         self.reloc_events.append((self._frame_idx, old_id))
         info.update(tracked=True, n_inliers=n_inl, state="RELOC")
         return True

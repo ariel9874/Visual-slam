@@ -75,6 +75,18 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
   LightGlue, cvg), kornia 0.8.3, opencv 4.11, numpy 1.26.4, matplotlib, pytest.
   Los tests siguen con runner `__main__` (`python tests/test_X.py`). El python
   del sistema (3.13, WindowsApps) NO tiene torch/gtsam: no usarlo.
+- **Contenedor ROS 2 (julio 2026)**: entorno Linux reproducible en `docker/`
+  para correr tests/ejemplos en Linux y prototipar los wrappers ROS de v0.6/v0.8.
+  Base `osrf/ros:kilted-desktop-full` (ya en disco; el distro es un `ARG` →
+  cambiar a `osrf/ros:jazzy-desktop-full` para LTS es una línea). Deps del núcleo
+  desde apt (numpy 1.26, opencv 4.6 con MAGSAC+SIFT, matplotlib, scipy, pytest)
+  para compartir ABI con ROS y respetar `numpy<2`; el paquete `vslam` entra por
+  `PYTHONPATH` (repo montado en `/workspace`), sin `pip install`. Verificado:
+  `import vslam` OK, `ros2` OK, **21/21 tests de geometría pasan** dentro.
+  Build/uso en `docker/README.md`. Limitaciones conscientes: la imagen no trae
+  CUDA/torch (SuperPoint/LightGlue NO corren ahí — requerirían base CUDA aparte);
+  GUI (rviz2) comentada (WSLg en Win 11); sin host networking (DDS por memoria
+  compartida, `ipc: host` + `ROS_LOCALHOST_ONLY`).
 
 ---
 
@@ -91,6 +103,7 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
 | v0.35 | BA local (Schur), mapa local, observaciones, cierre de bucle visual, examples/04, secuencia corredor | ORB forward 2.6→3.1 cm; corredor 8.4/6.7 cm |
 | v0.4a | Álgebra Sim(3), grafo genérico por grupo, bucle Sim(3), **covisibilidad**, filtro anti-duplicados | **corredor 2.2 cm** (criterio < 3 cumplido) |
 | v0.4b | **Relocalización** (PnP global), **compuerta de movimiento** (emparejada), **culling de puntos**, helper `_match_against_kf` compartido, test de secuestro | corredor **2.0 cm**; secuestro recuperado en **2 frames**; culling **-33.9%** del mapa |
+| v0.45 (en progreso) | **Datos REALES**: distorsión Brown-Conrady, loader TUM RGB-D, driver `examples/05`, benchmark batch, **matching guiado por reproyección**, re-anclaje de mapa local tras reloc, **BA global offline**, métrica de trayectoria final de KFs | **TUM (trayectoria final de KFs): fr1_xyz 1.8 / fr2_desk 3.7 / fr2_xyz 12.0 cm**, cero colapsos (≤5 frames perdidos, 0 relocs). Sin guiado colapsaban (fr2_desk 1347 perdidos). Sintético mejoró: 02 2.4, 04 1.7, secuestro 1.1 cm |
 
 ### 3.2 Números de referencia actuales (para detectar regresiones)
 
@@ -104,22 +117,32 @@ python tests/test_triangulation_pnp.py    # 5 tests
 python tests/test_pose_graph.py           # 6 tests (incl. Sim3 + Strasdat)
 python tests/test_bundle_adjustment.py    # 2 tests
 python tests/test_relocalization.py       # secuestro (v0.4b): gate->coast->reloc
+python tests/test_camera_distortion.py    # 3 tests distorsión de lente (v0.45)
 
 # Datos sintéticos (si data/ no existe — está en .gitignore):
 python scripts/make_synthetic_sequence.py --output data/synthetic
 python scripts/make_synthetic_sequence.py --output data/synthetic_loop --motion loop --frames 200
 
-# Ejemplo 02 (forward): esperado ~3.1 cm ORB, ~0.3 cm SIFT
+# Ejemplo 02 (forward): esperado ~2.4 cm ORB (era 3.1 antes del matching guiado
+# de v0.45; el guiado mejoró init→final)
 python examples/02_pnp_tracking.py --images data/synthetic/images --calib data/synthetic/calib.txt --output output/pnp --gt data/synthetic/groundtruth.txt
 
-# Ejemplo 04 (corredor): esperado ~2.0 cm con y sin bucle (2 bucles cerrados;
-# eran 2.2 antes del culling — la poda de espurios mejoró ligeramente el ATE)
+# Ejemplo 04 (corredor): esperado ~1.7 cm con y sin bucle (2 bucles; era 2.2
+# pre-culling, 2.0 pre-guiado — cada mejora de v0.4b/v0.45 bajó un poco el ATE)
 python examples/04_loop_closure.py
 
 # Test de secuestro (v0.4b): teletransporta 79->3 y verifica gate+coast+reloc.
 # Esperado: perdida detectada en <5 frames, reloc contra KF0 en ~2 frames,
 # ATE post-recuperación ~2 cm. Regenera data/synthetic_loop si falta.
 python tests/test_relocalization.py
+
+# Datos REALES TUM RGB-D (v0.45). Bajar en data/tum/ (está en .gitignore):
+#   curl -LO https://cvg.cit.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_xyz.tgz
+#   (extraer con tar -xzf). Números esperados (trayectoria FINAL de KFs, la
+#   columna ATE-KF; la online es peor y NO es la métrica — lección 25):
+#   fr1_xyz 1.8 cm | fr2_desk 3.7 cm | fr2_xyz 12.0 cm | ≤5 perdidos, 0 relocs
+python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg1_xyz
+python scripts/benchmark_tum.py --data data/tum          # tabla batch por secuencia
 ```
 
 Notas: el modo `--no-ba` del ejemplo 04 da ~200 cm — es un modo de fallo
@@ -139,19 +162,28 @@ vslam/frontend/  features.py (registro: orb/akaze/brisk/sift/kaze/gftt-orb),
                  matching.py (ratio/crosscheck/flann, firma con kps para
                  aprendidos), learned.py (SuperPoint/DISK/LightGlue,
                  EXPERIMENTAL, requiere [deep]), tracker.py (PnPTracker: el
-                 corazón del sistema, ~700 líneas — leerlo entero antes de
-                 tocarlo)
+                 corazón del sistema, ~850 líneas — leerlo entero antes de
+                 tocarlo. v0.45: _guided_match (matching por reproyección),
+                 _local_ref_kf (re-anclaje del mapa local tras reloc),
+                 global_bundle_adjustment (BA global OFFLINE, lo llama el driver),
+                 keyframe_trajectory (métrica final vs online))
 vslam/backend/   factor_graph.py (interfaz + teoría MAP), pose_graph.py
                  (GaussNewtonPoseGraph genérico se3/sim3),
                  bundle_adjustment.py (BA con Schur + jacobianos analíticos)
 vslam/mapping/   base.py (MapperBase), sparse.py (puntos+observaciones+
                  covisibilidad+re-anclaje SE3/Sim3+apply_similarity+PLY+
                  culling v0.4b: _active/cull_points/active_count)
-vslam/           evaluation.py (Umeyama + ATE), io/dataset.py (loader genérico)
+vslam/core/      camera.py: + distorsión Brown-Conrady (v0.45): campo
+                 distortion, undistort_points (cv2), from_file parsea k1..k3
+vslam/           evaluation.py (Umeyama + ATE), io/dataset.py (loader genérico +
+                 TUMRGBDLoader/tum_camera/read_tum_trajectory/associate_by_timestamp,
+                 v0.45)
 examples/        01 (2D-2D didáctico autocontenido), 02 (PnP+BA),
-                 03 (grafo de poses simulado), 04 (corredor: bucle on/off)
+                 03 (grafo de poses simulado), 04 (corredor: bucle on/off),
+                 05 (datos reales TUM RGB-D, v0.45: pre-rectifica + ATE)
 scripts/         make_synthetic_sequence.py (forward: 3 planos; loop:
-                 corredor de carteles disjuntos), benchmark_frontends.py
+                 corredor de carteles disjuntos), benchmark_frontends.py,
+                 benchmark_tum.py (tabla batch por secuencia TUM, v0.45)
 tests/           5 archivos de geometría (21 tests) + test_relocalization.py
                  (secuestro, v0.4b), todos con runner __main__
 docs/            01 estado del arte, 02 arquitectura, 03 detectores,
@@ -182,6 +214,9 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
 | RELOC_AFTER / MIN_MATCHES / MIN_INLIERS (v0.4b) | 3 / 150 / 40 | matches más laxo que LOOP (sin riesgo de bucle sin sentido) |
 | GATE_STEP_FACTOR / MIN_SAMPLES / HISTORY (v0.4b) | 6× p95 / 20 / 200 | umbral robusto por percentil, no absoluto |
 | culling min_obs / min_age_kfs (v0.4b) | 3 / 3 | min_obs=2 es no-op (todo punto nace con 2 obs) |
+| KF_HEALTH_INLIERS (v0.45) | 45 | piso de salud de KF; con matching guiado deja de ser sensible (lección 21) |
+| GUIDED_RADIUS_PX / MAX_HAMMING (v0.45) | 15 / 64 | ventana de búsqueda del matching guiado; Hamming máx (ORB-SLAM TH_LOW=50) |
+| GBA_ITERATIONS (v0.45) | 10 | BA global OFFLINE (una vez tras la secuencia; online descarrila, lección 26) |
 
 ### 3.5 Estado administrativo — ¡IMPORTANTE!
 
@@ -289,6 +324,78 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     ya cubre esa zona y el tracking sigue liso. Para EJERCITAR la reloc en el
     test hay que teletransportar a una zona mapeada pero DISJUNTA en covisibilidad
     (la de salida: 79→3). Buena noticia de robustez; ojo al diseñar tests.
+21. **El piso de salud de KF es un trade-off por-secuencia, no una constante**
+    (v0.45). En sintético 45 (=3×MIN_PNP_INLIERS) protege de KFs basura (lección
+    8). En datos reales el óptimo se INVIERTE según la secuencia y ambos extremos
+    fallan: fr2_desk con 45 sufre INANICIÓN de KFs (el tracking sano ronda 20-52
+    inliers → no se insertan KFs → el mapa se congela → colapso, 1347 frames
+    perdidos; bajar a 25 → 278). fr1_xyz con 25 sufre lo contrario: KFs desde
+    poses marginales → puntos basura → tormenta de reloc (ATE 6.9→18.4 cm).
+    Diagnóstico: NO fue la compuerta (2 disparos/1700f) ni rotación (GT: 0°/frame
+    en el colapso) ni la selección local (el mapa GLOBAL daba 0 inliers) — se
+    aisló por-frame que el mapa dejaba de crecer. La cura real no fue una
+    constante mágica ni gestión adaptativa de KFs: fue el MATCHING GUIADO
+    (lección 24), que sube los inliers y hace la inanición imposible — con él,
+    45 y 25 dan el MISMO resultado en fr2_desk (el piso deja de ser sensible).
+22. **Matching por descriptor contra un mapa grande real da 0 inliers** (v0.45):
+    en fr2_desk (mapa ~10k puntos activos) el matching GLOBAL producía ~100-150
+    matches pero 0 inliers geométricos (ORB ambiguo a esa escala); el mapa LOCAL
+    (~650 pts) daba los únicos inliers reales. Confirma que el mapa local no es
+    solo eficiencia — es CORRECCIÓN; y que a escala real hace falta BoW + matching
+    guiado por reproyección (deuda §8). [diagnóstico local-vs-global]
+23. **La deriva de escala monocular domina los recorridos largos** (v0.45):
+    fr2_desk sin colapso (health=25) aún da ATE ~116 cm porque la escala Umeyama
+    deriva 1.82→1.05 entre mitades — ninguna alineación global única encaja (el
+    tramo 0-400, que aislado da 3.6 cm, bajo la escala global muestra 48). Los 15
+    bucles cerrados son todos LOCALES (gap 60): dan consistencia local pero no
+    atan la escala entre segmentos lejanos. El bucle GRANDE (volver al inicio) no
+    se cierra porque para entonces el sistema ya está perdido. Es la razón de ser
+    del cierre de bucle Sim(3) a escala de sesión, no solo local (trabajo futuro).
+    (Con matching guiado, lección 24, fr2_desk ya no colapsa y baja a 21.9 cm; la
+    escala sigue siendo el residual dominante — este es el próximo sub-problema.)
+24. **El matching GUIADO por reproyección es la palanca de robustez en real**
+    (v0.45): predecir la pose (velocidad constante), proyectar el mapa local y
+    buscar cada punto solo en una ventana de ~15 px — en vez del matching global
+    por descriptor, que a escala real es ambiguo (lección 22). El prior de pose
+    restringe la asociación → suben los inliers verdaderos → deja de haber
+    inanición de KFs Y mejoran las poses. Medido, un solo cambio:
+    - fr2_desk: 104.9 cm / 1347 frames perdidos (COLAPSO) → **21.9 cm / 0
+      perdidos**. fr2_xyz: 35/475 → **29/5**. fr1_xyz: 6.9/9 → **4.9/0**.
+    - Sintético mejoró también: 02 3.1→2.4, 04 2.0→1.7, secuestro 2.1→1.1 cm.
+    - **Deja obsoleta la perilla de la lección 21**: con inliers altos, el piso
+      de salud 45 = 25 (fr2_desk idéntico). La cura era el matching, no el umbral.
+    - Fallback: si el prior es malo (tras reloc/salto/inicio) el guiado rinde
+      poco y cae al matching global. Y destapó un gap: **la reloc no re-anclaba
+      el mapa local** en la zona reconocida (seguía en la recencia de antes del
+      salto) → tracking no continuaba. Corregido con `_local_ref_kf` (el mapa
+      local se ancla al KF relocalizado y su covisibilidad hasta el próximo KF):
+      el secuestro pasó de 4 relocs a 1. [tracker._guided_match, _local_kfs]
+25. **Evaluar la trayectoria FINAL de keyframes, no la ONLINE** (v0.45 — el
+    hallazgo más caro de no ver antes). El ATE se estaba midiendo sobre las
+    poses emitidas frame a frame, que se CONGELAN al emitirse: cuando el cierre
+    de bucle o el BA global corrigen el mapa en el frame 2700, NO reescriben las
+    poses ya reportadas de los frames 0..2699. Resultado: la métrica no veía NADA
+    del backend. Medido en fr2_desk: online 21.9 cm vs **trayectoria final de
+    keyframes 4.8 cm** (los 21 bucles llevaban corrigiendo todo el tiempo). Es la
+    métrica que reporta ORB-SLAM (poses de KFs optimizadas). El "problema de
+    deriva de escala" (lección 23) era en gran parte este artefacto de medición.
+    [tracker.keyframe_trajectory; driver y benchmark reportan ambas].
+26. **BA GLOBAL OFFLINE propaga la escala; online descarrila** (v0.45): el
+    grafo de poses Sim(3) del bucle corrige poses pero no re-estima los puntos →
+    la escala intermedia queda mal. El BA global (todos los KFs + puntos, 2
+    anclas de gauge) sí, y las OBSERVACIONES PUENTE que registra el cierre de
+    bucle (KF actual ve puntos del segmento viejo) atan los extremos → reparte la
+    corrección por la cadena. PERO probarlo ONLINE (tras cada bucle grande)
+    descarrila el tracking: el BA didáctico sobre un mapa grande (~240 KFs)
+    sacude el mapa y provoca tormentas de reloc (fr2_xyz 5→346 frames perdidos);
+    ni cooldown ni re-anclar el mapa local lo salvan — el problema es correr ese
+    BA repetido en caliente. Solución: como solo evaluamos la trayectoria FINAL
+    (lección 25), correr UN BA global OFFLINE al terminar. Medido:
+    - fr2_desk (final-KF): sin GBA 4.8 → con GBA **3.7 cm** (un solo BA; el
+      per-bucle daba 2.0 pero desestabilizaba fr2_xyz).
+    - fr2_xyz: online 330 perdidos/26 cm → offline **5 perdidos/0 relocs/12 cm**.
+    Es el "full BA" offline de ORB-SLAM. [tracker.global_bundle_adjustment, lo
+    llama el driver/benchmark tras la secuencia]
 
 ---
 
@@ -392,20 +499,40 @@ ejemplo — PREFERIR un script de verificación reproducible):
 El detalle completo está en [docs/04_hoja_de_ruta_v1.md](04_hoja_de_ruta_v1.md).
 Resumen operativo de lo inmediato:
 
-- **v0.45 — Datos reales** (la siguiente etapa grande y la MÁS importante):
-  - Loaders TUM RGB-D (formato: rgb.txt/depth.txt con timestamps,
-    groundtruth.txt TUM; asociación por timestamp más cercano), KITTI odometry
-    (image_0/ + calib.txt P0 + poses.txt matrices 3×4) y EuRoC (cam0/data.csv,
-    body↔cam extrinsics en sensor.yaml — cuidado: GT en frame del IMU).
-  - Distorsión: añadir `distortion` (k1,k2,p1,p2,k3) a PinholeCamera +
-    `undistort_points` (cv2) ANTES de la geometría; o pre-rectificar imágenes.
-  - Los umbrales de §3.4 están calibrados en sintético: esperar re-calibración
-    (hacerla con barridos y documentar).
-  - Benchmark batch: extender scripts/benchmark_frontends.py o script nuevo
-    con tabla por secuencia; CI en GitHub Actions (tests + humo sintético).
-  - Criterio: ≥ 6 secuencias públicas sin perderse, tabla reproducible.
+- **v0.45 — Datos reales** (EN PROGRESO — la etapa grande y la MÁS importante):
+  HECHO:
+  - ✅ Distorsión Brown-Conrady en `PinholeCamera` (campo `distortion`,
+    `undistort_points`, `from_file` parsea k1..k3) + test. La geometría del repo
+    asume el modelo ideal → el driver PRE-RECTIFICA (cv2.undistort).
+  - ✅ Loader TUM RGB-D (`TUMRGBDLoader`, `tum_camera` con intrínsecos fr1/2/3,
+    `read_tum_trajectory`, `associate_by_timestamp` mocap↔rgb). Driver
+    `examples/05_tum_rgbd.py` + `scripts/benchmark_tum.py` (tabla batch).
+  - ✅ **MATCHING GUIADO por reproyección** (lección 24): predecir pose +
+    proyectar mapa local + buscar en ventana de 15 px. Eliminó los colapsos en
+    las 3 secuencias (frames perdidos fr2_desk 1347→0). Curó la inanición de KFs
+    (el piso de salud `KF_HEALTH_INLIERS` deja de ser sensible, lección 21;
+    default 45). Incluye re-anclaje del mapa local tras reloc (`_local_ref_kf`).
+  - ✅ **Métrica correcta + BA global offline** (lecciones 25-26): el ATE se
+    medía sobre la trayectoria ONLINE (poses congeladas al emitirse), que no ve
+    las correcciones del backend. Sobre la trayectoria FINAL de keyframes
+    (`keyframe_trajectory`) + un BA global OFFLINE al terminar
+    (`global_bundle_adjustment`): **fr1_xyz 1.8 / fr2_desk 3.7 / fr2_xyz 12.0 cm**
+    (antes online 4.9/21.9/29), ≤5 frames perdidos, 0 relocs en las 3. El GBA
+    online se probó y descarrilaba (lección 26) → offline.
+  PENDIENTE (lo que queda de v0.45):
+  - Bajar fr2_xyz (12 cm): más iteraciones de GBA / descriptor multi-vista del
+    mapa / cierre de bucle a escala de sesión durante el recorrido (no solo al
+    final). Deriva de escala aún presente pero ya no dominante (lección 23).
+  - Loaders KITTI odometry (image_0/ + calib P0 + poses 3×4) y EuRoC (cam0/
+    data.csv, extrinsics body↔cam en sensor.yaml — GT en frame del IMU).
+  - CI en GitHub Actions (tests + humo sintético).
+  - Criterio: ≥ 6 secuencias públicas SIN PERDERSE, tabla reproducible. Ahora:
+    3 TUM sin colapso (✅ "sin perderse", ATE 1.8-12 cm); falta añadir KITTI/EuRoC.
 - **v0.5 — C++** (perfilar primero), **v0.6 — RGB-D**, **v0.7 — 3DGS mapper**,
   **v0.8 — ROS 2**, **v0.9 — endurecimiento**, **v1.0**.
+  - Infraestructura ya lista para v0.6/v0.8: contenedor `docker/` con ROS 2 +
+    el núcleo Python (ver §2 y `docker/README.md`). Los wrappers previstos
+    (`vslam_ros`, `vslam_msgs`, TF REP-105) están diseñados en `ros2/README.md`.
 
 ---
 
@@ -419,7 +546,8 @@ Resumen operativo de lo inmediato:
 | `_kf_db` guarda kps+desc de todos los KFs | Memoria lineal; BoW lo reemplazará |
 | `_try_close_loop` matchea contra toda la db por KF | Ídem |
 | Frame.timestamp = 0.0 en los KFs internos | Propagar cuando importe (datasets reales) |
-| Umbrales calibrados solo en sintético | Re-calibrar en v0.45 |
+| Umbrales calibrados solo en sintético | v0.45: piso de salud de KF ya es perilla (lección 21). Resto pendiente por-dataset |
+| Robustez de recorrido largo en real | fr2_xyz 35 / fr2_desk ~105 cm: KFs adaptativos + matching guiado + bucle a escala de sesión (lecciones 21-23). Sub-hito de v0.45 |
 | learned.py (SuperPoint/DISK/LightGlue) | VERIFICADO en GPU (v0.4b): SuperPoint+LightGlue corren en la RTX 4070 (env `vslam`). Falta integrarlo/benchmark en secuencias |
 | Números del benchmark en README pre-BA | Re-correr y refrescar al tocar el benchmark |
 | Modo --no-ba del corredor colapsa (~200 cm) | Conocido; no es objetivo |

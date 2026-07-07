@@ -1,0 +1,62 @@
+# Contenedor de pruebas ROS 2 + Visual-SLAM.
+#
+#   docker compose -f docker/docker-compose.yml build     # construir
+#   docker compose -f docker/docker-compose.yml run --rm vslam-ros   # shell
+#
+# Dentro del contenedor, el repo está en /workspace (montado en vivo: editas en
+# Windows, se refleja al instante). `import vslam` y `ros2` funcionan de una.
+
+services:
+  vslam-ros:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        # Cambia a osrf/ros:jazzy-desktop-full para la variante LTS.
+        ROS_IMAGE: osrf/ros:kilted-desktop-full
+    image: vslam-ros:latest
+    container_name: vslam-ros
+
+    # Shell interactiva utilizable con `run` o `exec`.
+    stdin_open: true
+    tty: true
+
+    # DDS por memoria compartida dentro del contenedor: no hace falta host
+    # networking (además, en Docker Desktop/Windows es limitado). Aíslo el
+    # dominio para no interferir con otros nodos ROS de la red.
+    environment:
+      - ROS_DOMAIN_ID=42
+      - ROS_LOCALHOST_ONLY=1
+      # Descomenta para reenviar GUI (rviz2) vía WSLg en Windows 11:
+      # - DISPLAY=${DISPLAY:-:0}
+
+    volumes:
+      # Repo completo en vivo (incluye data/ y output/, que están en .gitignore).
+      - ..:/workspace
+      # Cache de build de colcon persistente entre ejecuciones (para cuando se
+      # cree el workspace ROS con los paquetes vslam_ros/vslam_msgs).
+      - ros-build-cache:/workspace/ros2/build
+      - ros-install-cache:/workspace/ros2/install
+
+    working_dir: /workspace
+
+    # Para memoria compartida de DDS entre procesos del mismo contenedor.
+    ipc: host
+
+    # ── GPU (opcional) ──────────────────────────────────────────────────────
+    # Tienes el runtime nvidia disponible. La imagen desktop-full NO trae CUDA
+    # ni torch, así que el frontend aprendido (SuperPoint/LightGlue) no corre
+    # aquí tal cual. Si más adelante haces una imagen con CUDA+torch, habilita:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+    command: bash
+
+volumes:
+  ros-build-cache:
+  ros-install-cache:
