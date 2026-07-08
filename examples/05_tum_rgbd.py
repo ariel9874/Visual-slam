@@ -47,6 +47,9 @@ def main() -> int:
     parser.add_argument("--root", required=True, help="carpeta de la secuencia TUM")
     parser.add_argument("--output", default="output/tum")
     parser.add_argument("--detector", default="orb", choices=available_extractors())
+    parser.add_argument("--matcher", default="ratio",
+                        help="ratio (clásico) o lightglue (con --detector superpoint; "
+                             "GPU). SuperPoint+LightGlue rescatan las fr1 handheld")
     parser.add_argument("--window", type=int, default=8, help="keyframes del mapa local")
     parser.add_argument("--health", type=int, default=45,
                         help="piso de inliers para insertar KF; 45 va bien en la mayoria. "
@@ -64,7 +67,7 @@ def main() -> int:
           f"frontend: {args.detector}+ratio | cam fx={camera.fx:.1f}")
 
     tracker = PnPTracker(camera, extractor=create_extractor(args.detector),
-                         matcher=create_matcher("ratio"),
+                         matcher=create_matcher(args.matcher),
                          local_window=args.window, local_ba=not args.no_ba,
                          loop_closure=not args.no_loop)
     # Piso de salud de KF (perilla de re-calibración, v0.45). MEDIDO: es un

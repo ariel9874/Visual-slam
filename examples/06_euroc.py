@@ -45,6 +45,7 @@ def main() -> int:
     parser.add_argument("--root", required=True, help="carpeta de la secuencia EuRoC")
     parser.add_argument("--output", default="output/euroc")
     parser.add_argument("--detector", default="orb", choices=available_extractors())
+    parser.add_argument("--matcher", default="ratio", help="ratio o lightglue (GPU)")
     parser.add_argument("--window", type=int, default=8)
     parser.add_argument("--health", type=int, default=45)
     parser.add_argument("--max-frames", type=int, default=0)
@@ -58,7 +59,7 @@ def main() -> int:
           f"frontend: {args.detector}+ratio | cam fx={camera.fx:.1f}")
 
     tracker = PnPTracker(camera, extractor=create_extractor(args.detector),
-                         matcher=create_matcher("ratio"),
+                         matcher=create_matcher(args.matcher),
                          local_window=args.window, local_ba=True, loop_closure=True)
     tracker.KF_HEALTH_INLIERS = args.health
 

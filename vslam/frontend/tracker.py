@@ -152,6 +152,15 @@ class PnPTracker(TrackerBase):
         self.camera = camera
         self.extractor = extractor or create_extractor("orb")
         self.matcher = matcher or create_matcher("ratio")
+        # LightGlue solo empareja 2D-2D (necesita keypoints de AMBOS lados y el
+        # tamaño de imagen: su atención es espacial). Pero el matching 3D-2D
+        # contra el mapa y la validación de 3ª vista no tienen kps del lado del
+        # mapa → hace falta un matcher por descriptor para esos dos casos. Con
+        # LightGlue se usa uno de ratio; con un matcher clásico, el mismo (sin
+        # cambio de comportamiento). Ver los usos marcados con _desc_matcher.
+        self._desc_matcher = (create_matcher("ratio")
+                              if getattr(self.matcher, "name", "") == "lightglue"
+                              else self.matcher)
         # Ojo: `mapper or ...` sería un bug — un mapper VACÍO define __len__=0
         # y Python lo evalúa como falsy, creando silenciosamente otro objeto.
         self.mapper = mapper if mapper is not None else SparsePointMapper()
@@ -349,7 +358,7 @@ class PnPTracker(TrackerBase):
             return False                # aún no hay vista intermedia real
         mid_kps, mid_desc = self._init_buffer[len(self._init_buffer) // 2]
 
-        matches = self.matcher.match(descriptors, mid_desc, None, mid_kps, None)
+        matches = self._desc_matcher.match(descriptors, mid_desc, None, mid_kps, None)
         if len(matches) < self.MIN_MAP_MATCHES:
             return False
         obj = points_w[[m.queryIdx for m in matches]]
@@ -466,7 +475,8 @@ class PnPTracker(TrackerBase):
             matches = self._guided_match(kps, desc, T_pred, map_pts, map_desc)
         info["guided"] = len(matches)
         if len(matches) < self.MIN_MAP_MATCHES:
-            matches = self.matcher.match(map_desc, desc, None, kps, gray.shape)
+            # Fallback 3D-2D por descriptor (el mapa no tiene kps → no LightGlue).
+            matches = self._desc_matcher.match(map_desc, desc, None, kps, gray.shape)
         info["n_matches"] = len(matches)
         if len(matches) < self.MIN_MAP_MATCHES:
             self._coast(gray, kps, desc, info)
