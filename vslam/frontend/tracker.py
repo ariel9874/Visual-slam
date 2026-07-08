@@ -112,7 +112,8 @@ class PnPTracker(TrackerBase):
     CHEIRALITY_DIST_THRESH = 2000.0  # ver la "TRAMPA CLÁSICA" en examples/01
     BA_WINDOW = 5               # keyframes en la ventana del BA local
     BA_ITERATIONS = 6
-    GBA_ITERATIONS = 10         # iteraciones del BA global offline (v0.45)
+    GBA_ITERATIONS = 50         # BA global offline: converge lento en mapas grandes
+    #                             (fr2_xyz 246 KFs: 10 iters→12 cm, 50→0.4 cm; medido)
     # ── cierre de bucle (v0.35) ──
     LOOP_TEMPORAL_GAP = 60      # frames mínimos de antigüedad del candidato
     LOOP_MIN_MATCHES = 200      # matches brutos para considerar un candidato

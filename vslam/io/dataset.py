@@ -10,6 +10,7 @@ truth, calibración). Aquí: TUM RGB-D. KITTI y EuRoC vendrán después.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -153,3 +154,111 @@ def associate_by_timestamp(query_ts: np.ndarray, ref_ts: np.ndarray,
         if best is not None and abs(ref_sorted[best] - q) <= max_dt:
             out[i] = order[best]
     return out
+
+
+# ── EuRoC MAV (formato ASL) ──────────────────────────────────────────────────
+# Estructura: <sec>/mav0/cam0/{data.csv, data/*.png, sensor.yaml} +
+#             <sec>/mav0/state_groundtruth_estimate0/data.csv (GT en frame del
+#             CUERPO/IMU — hay que llevarlo a la cámara con el extrínseco T_BS).
+# Dron con movimiento agresivo 6-DoF: buen estrés para reloc/gate, distinto a TUM.
+
+def _yaml_list(text: str, key: str) -> List[float]:
+    """Extrae la lista `key: [a, b, c, ...]` de un YAML de EuRoC (parser mínimo,
+    sin dependencia de PyYAML). Soporta listas multilínea (T_BS.data) e ignora
+    comentarios tras el cierre `]`. Es cuadrado para lo que necesitamos —
+    intrinsics, distortion_coefficients, resolution y la matriz T_BS."""
+    m = re.search(rf"(?m)^\s*{re.escape(key)}\s*:\s*\[(.*?)\]", text, re.DOTALL)
+    if not m:
+        raise ValueError(f"clave '{key}' no encontrada o sin lista en el sensor.yaml")
+    return [float(x) for x in m.group(1).replace("\n", " ").split(",") if x.strip()]
+
+
+def _quat_wxyz_to_R(q: np.ndarray) -> np.ndarray:
+    """Rotación (3×3) desde un cuaternión [w, x, y, z] (la convención del GT de
+    EuRoC: q_RS = orientación del cuerpo en el frame de referencia)."""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ], dtype=np.float64)
+
+
+def euroc_camera(root: str | Path, cam: str = "cam0") -> PinholeCamera:
+    """Cámara EuRoC desde `mav0/<cam>/sensor.yaml` (pinhole + radial-tangencial).
+    EuRoC da 4 coeficientes (k1, k2, p1, p2); k3 = 0 en Brown-Conrady."""
+    text = (Path(root) / "mav0" / cam / "sensor.yaml").read_text(encoding="utf-8")
+    fx, fy, cx, cy = _yaml_list(text, "intrinsics")
+    k1, k2, p1, p2 = _yaml_list(text, "distortion_coefficients")[:4]
+    w, h = (int(round(v)) for v in _yaml_list(text, "resolution"))
+    return PinholeCamera(fx=fx, fy=fy, cx=cx, cy=cy, width=w, height=h,
+                         distortion=(k1, k2, p1, p2, 0.0))
+
+
+class EuRoCLoader:
+    """Itera (timestamp_seg, imagen_gris) sobre una secuencia EuRoC MAV.
+
+    Los timestamps del CSV están en NANOsegundos → se pasan a segundos (÷1e9)
+    para casar con el GT y con el resto del repo (formato TUM en segundos).
+    """
+
+    def __init__(self, root: str | Path, cam: str = "cam0") -> None:
+        self.root = Path(root)
+        self.cam_dir = self.root / "mav0" / cam
+        csv = self.cam_dir / "data.csv"
+        if not csv.is_file():
+            raise FileNotFoundError(f"No existe {csv} (¿es una secuencia EuRoC?)")
+        self.entries: List[Tuple[float, str]] = []
+        for line in csv.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            ts, fn = line.split(",")[:2]
+            self.entries.append((int(ts) * 1e-9, fn.strip()))
+        if not self.entries:
+            raise FileNotFoundError(f"data.csv sin entradas en {self.cam_dir}")
+
+    @property
+    def timestamps(self) -> np.ndarray:
+        return np.array([t for t, _ in self.entries], dtype=np.float64)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __iter__(self) -> Iterator[Tuple[float, np.ndarray]]:
+        for ts, fn in self.entries:
+            image = cv2.imread(str(self.cam_dir / "data" / fn), cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                raise IOError(f"No se pudo leer la imagen: {self.cam_dir / 'data' / fn}")
+            yield ts, image
+
+
+def read_euroc_groundtruth(root: str | Path, cam: str = "cam0"
+                           ) -> Tuple[np.ndarray, np.ndarray]:
+    """(timestamps_seg, posiciones de la CÁMARA en el mundo) del GT de EuRoC.
+
+    ─── La matemática: el GT vive en el frame del CUERPO (IMU) ───
+    EuRoC entrega T_world_body (posición p_RS_R + cuaternión q_RS del cuerpo).
+    La cámara está desplazada del cuerpo por el extrínseco T_BS (cuerpo←cámara,
+    en cam0/sensor.yaml). La posición de la cámara en el mundo es:
+
+        p_cam_world = T_world_body · T_BS · [0,0,0,1]ᵀ
+                    = R_world_body · t_BS + p_world_body
+
+    Sin esta corrección, comparar la trayectoria de la cámara (estimada) con la
+    del cuerpo (GT) mete un error de brazo de palanca que ROTA con la pose (no
+    lo absorbe la alineación de similitud del ATE). El brazo t_BS en EuRoC es de
+    ~7 cm: pequeño pero medible, y es la trampa que advierte docs/05 §7.
+    """
+    gt_csv = Path(root) / "mav0" / "state_groundtruth_estimate0" / "data.csv"
+    data = np.loadtxt(gt_csv, delimiter=",")
+    if data.ndim == 1:
+        data = data[None, :]
+    ts = data[:, 0] * 1e-9
+    p_body = data[:, 1:4]
+    q = data[:, 4:8]                                  # [w, x, y, z]
+    text = (Path(root) / "mav0" / cam / "sensor.yaml").read_text(encoding="utf-8")
+    t_bs = np.array(_yaml_list(text, "data")).reshape(4, 4)[:3, 3]
+    pos = np.array([_quat_wxyz_to_R(q[i]) @ t_bs + p_body[i]
+                    for i in range(len(ts))])
+    return ts, pos

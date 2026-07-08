@@ -1,0 +1,53 @@
+name: CI
+
+# Verificación reproducible del núcleo geométrico (v0.45). NO instala gtsam ni
+# torch: los 21 tests de geometría + el de distorsión son NumPy + OpenCV puro
+# (el frontend aprendido y el adaptador GTSAM se prueban aparte, con GPU/conda).
+# Es la pata "reproducible" del criterio de datos reales: si esto pasa en un
+# Ubuntu limpio, cualquiera reproduce los números sintéticos del repo.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias del núcleo
+        # numpy<2 y opencv<5: la misma combinación validada en el env conda
+        # `vslam` (gtsam exige numpy<2; opencv 5.x lo arrastra a numpy>=2).
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy<2" "opencv-python-headless>=4.8,<5" "matplotlib>=3.7"
+
+      - name: Tests de geometría (21) + distorsión (3) + loader EuRoC (3)
+        run: |
+          set -e
+          for t in test_pose_recovery test_frontends test_triangulation_pnp \
+                   test_pose_graph test_bundle_adjustment test_camera_distortion \
+                   test_euroc_loader; do
+            echo "==== $t ===="
+            python "tests/$t.py"
+          done
+
+      - name: Humo sintético (secuencias + ejemplos + secuestro)
+        # Regenera data/ (está en .gitignore) y corre el sistema de punta a punta:
+        # PnP+BA (ej. 02), mapa local+bucle (ej. 04) y relocalización (secuestro).
+        run: |
+          set -e
+          python scripts/make_synthetic_sequence.py --output data/synthetic
+          python scripts/make_synthetic_sequence.py --output data/synthetic_loop --motion loop --frames 200
+          python examples/02_pnp_tracking.py --images data/synthetic/images \
+              --calib data/synthetic/calib.txt --output output/pnp \
+              --gt data/synthetic/groundtruth.txt
+          python examples/04_loop_closure.py
+          python tests/test_relocalization.py

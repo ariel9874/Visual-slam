@@ -103,7 +103,7 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
 | v0.35 | BA local (Schur), mapa local, observaciones, cierre de bucle visual, examples/04, secuencia corredor | ORB forward 2.6→3.1 cm; corredor 8.4/6.7 cm |
 | v0.4a | Álgebra Sim(3), grafo genérico por grupo, bucle Sim(3), **covisibilidad**, filtro anti-duplicados | **corredor 2.2 cm** (criterio < 3 cumplido) |
 | v0.4b | **Relocalización** (PnP global), **compuerta de movimiento** (emparejada), **culling de puntos**, helper `_match_against_kf` compartido, test de secuestro | corredor **2.0 cm**; secuestro recuperado en **2 frames**; culling **-33.9%** del mapa |
-| v0.45 (en progreso) | **Datos REALES**: distorsión Brown-Conrady, loader TUM RGB-D, driver `examples/05`, benchmark batch, **matching guiado por reproyección**, re-anclaje de mapa local tras reloc, **BA global offline**, métrica de trayectoria final de KFs | **TUM (trayectoria final de KFs): fr1_xyz 1.8 / fr2_desk 3.7 / fr2_xyz 12.0 cm**, cero colapsos (≤5 frames perdidos, 0 relocs). Sin guiado colapsaban (fr2_desk 1347 perdidos). Sintético mejoró: 02 2.4, 04 1.7, secuestro 1.1 cm |
+| v0.45 (en progreso) | **Datos REALES**: distorsión Brown-Conrady, loader TUM RGB-D, driver `examples/05`, benchmark batch, **matching guiado por reproyección**, re-anclaje de mapa local tras reloc, **BA global offline** (50 iters), métrica de trayectoria final de KFs | **TUM movimiento moderado (trayectoria final de KFs): fr2_xyz 0.4 / fr1_xyz 1.8 / fr2_desk 2.1 cm**, 0 colapsos. En 6 secuencias, las fr1 handheld se pierden y fr3 deriva (límites del frontend mínimo, lección 28). Sintético mejoró: 02 2.4, 04 1.7, secuestro 1.1 cm |
 
 ### 3.2 Números de referencia actuales (para detectar regresiones)
 
@@ -118,6 +118,7 @@ python tests/test_pose_graph.py           # 6 tests (incl. Sim3 + Strasdat)
 python tests/test_bundle_adjustment.py    # 2 tests
 python tests/test_relocalization.py       # secuestro (v0.4b): gate->coast->reloc
 python tests/test_camera_distortion.py    # 3 tests distorsión de lente (v0.45)
+python tests/test_euroc_loader.py         # 3 tests loader EuRoC (fixture, v0.45)
 
 # Datos sintéticos (si data/ no existe — está en .gitignore):
 python scripts/make_synthetic_sequence.py --output data/synthetic
@@ -140,7 +141,7 @@ python tests/test_relocalization.py
 #   curl -LO https://cvg.cit.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_xyz.tgz
 #   (extraer con tar -xzf). Números esperados (trayectoria FINAL de KFs, la
 #   columna ATE-KF; la online es peor y NO es la métrica — lección 25):
-#   fr1_xyz 1.8 cm | fr2_desk 3.7 cm | fr2_xyz 12.0 cm | ≤5 perdidos, 0 relocs
+#   fr1_xyz 1.8 cm | fr2_desk 2.1 cm | fr2_xyz 0.4 cm | ≤5 perdidos, 0 relocs
 python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg1_xyz
 python scripts/benchmark_tum.py --data data/tum          # tabla batch por secuencia
 ```
@@ -176,11 +177,12 @@ vslam/mapping/   base.py (MapperBase), sparse.py (puntos+observaciones+
 vslam/core/      camera.py: + distorsión Brown-Conrady (v0.45): campo
                  distortion, undistort_points (cv2), from_file parsea k1..k3
 vslam/           evaluation.py (Umeyama + ATE), io/dataset.py (loader genérico +
-                 TUMRGBDLoader/tum_camera/read_tum_trajectory/associate_by_timestamp,
-                 v0.45)
+                 TUMRGBDLoader/tum_camera/read_tum_trajectory/associate_by_timestamp
+                 + EuRoCLoader/euroc_camera/read_euroc_groundtruth (parser
+                 sensor.yaml sin PyYAML, GT cuerpo→cámara), v0.45)
 examples/        01 (2D-2D didáctico autocontenido), 02 (PnP+BA),
                  03 (grafo de poses simulado), 04 (corredor: bucle on/off),
-                 05 (datos reales TUM RGB-D, v0.45: pre-rectifica + ATE)
+                 05 (datos reales TUM RGB-D, v0.45), 06 (EuRoC MAV, v0.45)
 scripts/         make_synthetic_sequence.py (forward: 3 planos; loop:
                  corredor de carteles disjuntos), benchmark_frontends.py,
                  benchmark_tum.py (tabla batch por secuencia TUM, v0.45)
@@ -216,7 +218,7 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
 | culling min_obs / min_age_kfs (v0.4b) | 3 / 3 | min_obs=2 es no-op (todo punto nace con 2 obs) |
 | KF_HEALTH_INLIERS (v0.45) | 45 | piso de salud de KF; con matching guiado deja de ser sensible (lección 21) |
 | GUIDED_RADIUS_PX / MAX_HAMMING (v0.45) | 15 / 64 | ventana de búsqueda del matching guiado; Hamming máx (ORB-SLAM TH_LOW=50) |
-| GBA_ITERATIONS (v0.45) | 10 | BA global OFFLINE (una vez tras la secuencia; online descarrila, lección 26) |
+| GBA_ITERATIONS (v0.45) | 50 | BA global OFFLINE (converge lento en mapas grandes: 10 iters no basta, lecciones 26-27) |
 
 ### 3.5 Estado administrativo — ¡IMPORTANTE!
 
@@ -390,12 +392,31 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     sacude el mapa y provoca tormentas de reloc (fr2_xyz 5→346 frames perdidos);
     ni cooldown ni re-anclar el mapa local lo salvan — el problema es correr ese
     BA repetido en caliente. Solución: como solo evaluamos la trayectoria FINAL
-    (lección 25), correr UN BA global OFFLINE al terminar. Medido:
-    - fr2_desk (final-KF): sin GBA 4.8 → con GBA **3.7 cm** (un solo BA; el
-      per-bucle daba 2.0 pero desestabilizaba fr2_xyz).
-    - fr2_xyz: online 330 perdidos/26 cm → offline **5 perdidos/0 relocs/12 cm**.
-    Es el "full BA" offline de ORB-SLAM. [tracker.global_bundle_adjustment, lo
-    llama el driver/benchmark tras la secuencia]
+    (lección 25), correr UN BA global OFFLINE al terminar. Es el "full BA" offline
+    de ORB-SLAM. [tracker.global_bundle_adjustment, lo llama el driver/benchmark
+    tras la secuencia]. Medido (final-KF): fr2_desk sin GBA 4.8 → **2.1 cm**;
+    fr2_xyz 13 → **0.4 cm**; fr1_xyz **1.8 cm**.
+27. **El BA global NO había convergido con 10 iteraciones** (v0.45): en mapas
+    grandes el LM-Schur didáctico converge LENTO. El "límite" de fr2_xyz (246 KFs,
+    81 bucles) no era estructural — era falta de iteraciones. Barrido medido
+    (mismo mapa, GBA offline): 0→13.0, 10→12.0, 25→3.5, **50→0.4**, 100→0.3 cm.
+    Con 10 el BA se quedaba a mitad de camino; a 50 converge. Como es offline y
+    corre UNA vez, 50 iteraciones son baratas. Moraleja: antes de creer que un
+    residual es de fondo (deriva de escala…), verificar que el optimizador
+    convergió. [GBA_ITERATIONS = 50]
+28. **El envelope de operación del frontend mínimo** (v0.45, 6 secuencias TUM):
+    excelente en movimiento MODERADO (fr1_xyz 1.8 / fr2_xyz 0.4 / fr2_desk 2.1 cm,
+    0 perdidos), pero dos límites medidos y comprendidos:
+    - **fr1_desk / fr1_room se PIERDEN** (560/613 y 988/1362 frames perdidos):
+      son handheld con rotación rápida + motion blur → el matching ORB (aun
+      guiado) no engancha. Es el caso que pide KLT/directo o features aprendidas
+      (SuperPoint, ya instalado) o un IMU — trabajo futuro, no un umbral.
+    - **fr3_long_office trackea entero (0 perdidos) pero deriva a 78.5 cm**: NO
+      es convergencia (GBA plateau 25→200 iters = 78.5) ni falta de bucles (los
+      grandes cierran, saltos 2082-2130). Es SISTEMÁTICO: la calibración fr3
+      (dist=0, la "ROS default" de TUM) sesga la geometría, y/o un recorrido
+      largo complejo cuyos bucles solo atan el final. Verificar si TUM publica
+      distorsión real para fr3; si no, es límite del modelo pinhole ideal.
 
 ---
 
@@ -518,16 +539,37 @@ Resumen operativo de lo inmediato:
     (`keyframe_trajectory`) + un BA global OFFLINE al terminar
     (`global_bundle_adjustment`): **fr1_xyz 1.8 / fr2_desk 3.7 / fr2_xyz 12.0 cm**
     (antes online 4.9/21.9/29), ≤5 frames perdidos, 0 relocs en las 3. El GBA
-    online se probó y descarrilaba (lección 26) → offline.
+    online se probó y descarrilaba (lección 26) → offline. Y el BA no convergía
+    con 10 iteraciones (lección 27): a 50, **fr2_xyz 12→0.4, fr2_desk 3.7→2.1 cm**.
+  ESTADO TUM (trayectoria final de KFs, GBA 50 iters): fr1_xyz **1.8** / fr2_desk
+  **2.1** / fr2_xyz **0.4** cm; 0 colapsos, ≤5 perdidos, 0 relocs — nivel ORB-SLAM.
   PENDIENTE (lo que queda de v0.45):
-  - Bajar fr2_xyz (12 cm): más iteraciones de GBA / descriptor multi-vista del
-    mapa / cierre de bucle a escala de sesión durante el recorrido (no solo al
-    final). Deriva de escala aún presente pero ya no dominante (lección 23).
-  - Loaders KITTI odometry (image_0/ + calib P0 + poses 3×4) y EuRoC (cam0/
-    data.csv, extrinsics body↔cam en sensor.yaml — GT en frame del IMU).
-  - CI en GitHub Actions (tests + humo sintético).
-  - Criterio: ≥ 6 secuencias públicas SIN PERDERSE, tabla reproducible. Ahora:
-    3 TUM sin colapso (✅ "sin perderse", ATE 1.8-12 cm); falta añadir KITTI/EuRoC.
+  - ✅ **CI en GitHub Actions** (`.github/workflows/ci.yml`): Ubuntu limpio,
+    Python 3.11, numpy<2 + opencv-headless<5 (sin gtsam/torch — el núcleo es
+    NumPy+OpenCV). Corre los 21 tests de geometría + distorsión + humo sintético
+    (ejemplos 02/04 + secuestro). Verificado local; el primer run verde depende
+    del push a GitHub. OJO: KITTI odometry son ~22 GB (no hay descarga por
+    secuencia) → NO meter datasets en CI; el CI es solo sintético.
+  - ✅ **Loader EuRoC MAV** (`EuRoCLoader`, `euroc_camera`, `read_euroc_groundtruth`
+    + `examples/06_euroc.py`): parser del `sensor.yaml` sin PyYAML (intrínsecos,
+    distorsión radtan, T_BS), timestamps ns→s, y GT del frame del CUERPO→CÁMARA
+    con el extrínseco (docs advertían la trampa del brazo de palanca). Validado
+    con fixture (`tests/test_euroc_loader.py`, 3 tests). PENDIENTE la corrida
+    sobre una secuencia REAL: el host de EuRoC (robotics.ethz.ch) estaba caído
+    (HTTP 000) al intentar bajar MH_01_easy (~1.5 GB) — reintentar / que Ariel
+    la baje. El loader queda listo para correr en cuanto haya datos.
+  - Loader KITTI odometry (image_0/ + calib P0 + poses 3×4 — descarga ~22 GB, el
+    gray completo; sin descarga por-secuencia). Estresará la escala (exterior).
+  - Criterio: ≥ 6 secuencias públicas SIN PERDERSE, tabla reproducible.
+    **6 TUM medidas** (trayectoria final de KFs, ATE en cm / frames perdidos):
+    ```
+    fr2_xyz   0.4 / 5      fr1_xyz  1.8 / 0     fr2_desk 2.1 / 0     ← ✅ excelentes
+    fr3_long 78.5 / 0      fr1_room 13.8/988    fr1_desk 2.2 / 560   ← límites (lección 28)
+    ```
+    4/6 trackean sin perderse (las 3 buenas + fr3, que trackea pero deriva); las
+    fr1 handheld se pierden. Para cumplir "6 SIN PERDERSE" con calidad falta:
+    frontend más robusto (fr1) y resolver fr3 (calibración/deriva) — o añadir
+    secuencias más amables (EuRoC cuando vuelva el host, o fr1_desk2/fr2_360).
 - **v0.5 — C++** (perfilar primero), **v0.6 — RGB-D**, **v0.7 — 3DGS mapper**,
   **v0.8 — ROS 2**, **v0.9 — endurecimiento**, **v1.0**.
   - Infraestructura ya lista para v0.6/v0.8: contenedor `docker/` con ROS 2 +
