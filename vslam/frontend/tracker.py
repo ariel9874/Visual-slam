@@ -135,7 +135,8 @@ class PnPTracker(TrackerBase):
                  mapper: Optional[SparsePointMapper] = None,
                  local_window: Optional[int] = None,
                  local_ba: bool = True,
-                 loop_closure: bool = False) -> None:
+                 loop_closure: bool = False,
+                 ba_backend: str = "numpy") -> None:
         """Args (además del frontend intercambiable):
             local_window: si se da, el matching 3D-2D usa solo los puntos de
                 los últimos N keyframes (mapa LOCAL: costo acotado, pero la
@@ -167,6 +168,14 @@ class PnPTracker(TrackerBase):
         self.local_window = local_window
         self.local_ba = local_ba
         self.loop_closure = loop_closure
+        # Backend del BA (v0.5): "numpy" (referencia didáctica) o "gtsam" (ruta
+        # de rendimiento — el BA era el 57% del tiempo, ver docs/05 §v0.5). Misma
+        # interfaz y mismos números (tests/test_gtsam_ba.py).
+        if ba_backend == "gtsam":
+            from vslam.backend.gtsam_ba import gtsam_bundle_adjustment
+            self._ba = gtsam_bundle_adjustment
+        else:
+            self._ba = local_bundle_adjustment
         self._kf_ids: list = []          # keyframes en orden de inserción
         self._kf_db: list = []           # historial para reconocimiento de lugar
         self._last_loop_frame = -10 ** 9
@@ -651,7 +660,7 @@ class PnPTracker(TrackerBase):
             counts[pid] = counts.get(pid, 0) + 1
         points = self.mapper.point_positions(
             {pid for pid, c in counts.items() if c >= 2})
-        opt_poses, opt_points = local_bundle_adjustment(
+        opt_poses, opt_points = self._ba(
             self.camera, kf_poses, points, obs, fixed_kfs=set(window[:2]),
             iterations=self.BA_ITERATIONS)
 
@@ -724,7 +733,7 @@ class PnPTracker(TrackerBase):
             counts[pid] = counts.get(pid, 0) + 1
         points = self.mapper.point_positions(
             {pid for pid, c in counts.items() if c >= 2})
-        opt_poses, opt_points = local_bundle_adjustment(
+        opt_poses, opt_points = self._ba(
             self.camera, kf_poses, points, obs, fixed_kfs=set(kfs[:2]),
             iterations=iterations or self.GBA_ITERATIONS)
         for k, T in opt_poses.items():
