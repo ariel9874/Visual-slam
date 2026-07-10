@@ -46,6 +46,7 @@ from vslam.core.frame import Frame
 from vslam.core.geometry import invert_se3, solve_pnp, triangulate_two_views
 from vslam.frontend.features import create_extractor
 from vslam.frontend.matching import create_matcher
+from vslam.frontend.place_recognition import BagOfVisualWords
 from vslam.mapping.sparse import SparsePointMapper
 
 # Popcount por byte: Hamming(a, b) = Σ popcount(a XOR b) sobre los 32 bytes de
@@ -140,6 +141,10 @@ class PnPTracker(TrackerBase):
     GUIDED_RADIUS_PX = 15.0     # ventana de búsqueda alrededor del punto proyectado
     GUIDED_MAX_HAMMING = 64     # distancia ORB máxima aceptable (ORB-SLAM: TH_LOW 50)
     GUIDED_MAX_L2 = 0.7         # ídem para descriptores float (SuperPoint, provisional)
+    # ── reconocimiento de lugar por BoW (v0.5) ──
+    BOW_WORDS = 512             # tamaño del vocabulario visual (en sesión)
+    BOW_TRAIN_KFS = 5           # entrenar el vocabulario al llegar a este nº de KFs
+    BOW_TOP_K = 5               # candidatos que pagan verificación geométrica
 
     def __init__(self, camera: PinholeCamera, extractor=None, matcher=None,
                  mapper: Optional[SparsePointMapper] = None,
@@ -176,6 +181,11 @@ class PnPTracker(TrackerBase):
         # Ruta C++ del matching guiado (v0.5): auto si el módulo compilado
         # existe; poner False para forzar la referencia Python (equivalencia).
         self.use_cpp = _fast_cpp is not None
+        # Reconocimiento de lugar por BoW (v0.5): baja el coste del candidato
+        # de bucle/reloc de O(KFs)·knnMatch a un query de ~3 ms (lección 34).
+        # use_bow=False fuerza la fuerza bruta original (referencia).
+        self.use_bow = True
+        self._bow = BagOfVisualWords(self.BOW_WORDS)
 
         # HILO DE MAPEO (v0.5, arquitectura ORB-SLAM): con async_mapping=True,
         # el bloque pesado del keyframe (BA + cierre de bucle + culling — el
@@ -699,6 +709,17 @@ class PnPTracker(TrackerBase):
         self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
                     "T": self.T_w_c.copy()}
         self._kf_db.append({"id": kf_id, "kps": kps, "desc": desc, "mp": mp})
+        if self.use_bow:
+            with self._map_lock:
+                if not self._bow.trained and len(self._kf_db) >= self.BOW_TRAIN_KFS:
+                    # Entrenamiento ÚNICO del vocabulario (~50 ms medidos) con
+                    # los descriptores de los primeros keyframes de la sesión;
+                    # acto seguido se indexan los KFs ya acumulados.
+                    self._bow.fit(np.vstack([e["desc"] for e in self._kf_db]))
+                    for e in self._kf_db:
+                        self._bow.add(e["id"], e["desc"])
+                elif self._bow.trained:
+                    self._bow.add(kf_id, desc)
         self._kf_inliers = max(info["n_inliers"], 1)
         self._frames_since_kf = 0
         info["state"] = "TRACK+KF"
@@ -937,16 +958,26 @@ class PnPTracker(TrackerBase):
 
         # 1+2) Reconocimiento de lugar + verificación geométrica en un solo
         # paso, vía el helper compartido con la relocalización (§_match_against_kf).
-        # De los candidatos con suficiente ANTIGÜEDAD (el filtro temporal: aquí
-        # sí, parecerse al pasado inmediato es continuidad, no un bucle) nos
-        # quedamos con el de más matches brutos que ADEMÁS pase la verificación
-        # PnP — antes se elegía el de más matches y si ese fallaba PnP se
-        # abortaba; ahora un candidato verificado nunca se pierde por culpa de
-        # otro no verificado.
+        # Con BoW (v0.5, lección 34): el índice invertido propone TOP-K
+        # candidatos en ~3 ms y SOLO esos pagan el matching completo — antes se
+        # matcheaba contra TODA la base (el cuello medido del keyframe, lección
+        # 32). Mientras no haya vocabulario (primeros KFs), fuerza bruta. De los
+        # candidatos con suficiente ANTIGÜEDAD (el filtro temporal: parecerse al
+        # pasado inmediato es continuidad, no un bucle) nos quedamos con el de
+        # más matches brutos que ADEMÁS pase la verificación PnP.
+        if self.use_bow and self._bow.trained:
+            with self._map_lock:
+                ranked = self._bow.query(desc, top_k=self.BOW_TOP_K + 5)
+            db_by_id = {e["id"]: e for e in self._kf_db}
+            candidates = [db_by_id[k] for k, _ in ranked
+                          if k in db_by_id
+                          and cur_id - k >= self.LOOP_TEMPORAL_GAP
+                          ][:self.BOW_TOP_K]
+        else:
+            candidates = [old for old in self._kf_db[:-1]
+                          if cur_id - old["id"] >= self.LOOP_TEMPORAL_GAP]
         best = None
-        for old in self._kf_db[:-1]:
-            if cur_id - old["id"] < self.LOOP_TEMPORAL_GAP:
-                continue
+        for old in candidates:
             n_matches, pairs, T_loop, inliers = self._match_against_kf(
                 old, gray, kps, desc)
             if n_matches < self.LOOP_MIN_MATCHES:
@@ -1075,12 +1106,20 @@ class PnPTracker(TrackerBase):
         re-mide la pose absoluta desde apariencia + geometría. Es lo que permite
         sobrevivir a un "secuestro" (la cámara teletransportada): un sistema que
         solo integra movimiento no puede; uno que localiza contra un mapa, sí.
-        Riesgo conocido: el matching contra toda la db es O(KFs) — trivial con
-        ~15 KFs; a escala real es reconocimiento por bolsa de palabras (docs/03
-        §3). Se elige el candidato con MÁS inliers PnP (máximo soporte geométrico).
+        Candidatos: BoW top-K si hay vocabulario (v0.5 — el "a escala real es
+        BoW" que esta nota prometía desde v0.4b, lección 34); si no, toda la
+        base (fuerza bruta original). Se elige el candidato con MÁS inliers PnP
+        (máximo soporte geométrico).
         """
+        if self.use_bow and self._bow.trained:
+            with self._map_lock:
+                ranked = self._bow.query(desc, top_k=self.BOW_TOP_K)
+            db_by_id = {e["id"]: e for e in self._kf_db}
+            candidates = [db_by_id[k] for k, _ in ranked if k in db_by_id]
+        else:
+            candidates = list(self._kf_db)
         best = None
-        for old in self._kf_db:
+        for old in candidates:
             n_matches, pairs, T_pnp, inliers = self._match_against_kf(
                 old, gray, kps, desc)
             if n_matches < self.RELOC_MIN_MATCHES or T_pnp is None:

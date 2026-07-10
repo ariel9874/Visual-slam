@@ -54,6 +54,11 @@ def main() -> int:
     parser.add_argument("--health", type=int, default=45,
                         help="piso de inliers para insertar KF; 45 va bien en la mayoria. "
                              "Bajar SOLO si hay inanicion de KFs (fr2_desk); ver docs/05 §7")
+    parser.add_argument("--ba", default="numpy", choices=["numpy", "gtsam", "isam2"],
+                        help="backend del BA local (numpy=referencia didactica)")
+    parser.add_argument("--fast", action="store_true",
+                        help="stack de TIEMPO REAL de v0.5: isam2 + hilo de mapeo "
+                             "(+ C++ guiado y BoW, que ya son auto). ~46 fps en fr2_desk")
     parser.add_argument("--no-ba", action="store_true")
     parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--max-frames", type=int, default=0)
@@ -66,10 +71,12 @@ def main() -> int:
     print(f"Secuencia: {root.name} | {len(loader)} frames | "
           f"frontend: {args.detector}+ratio | cam fx={camera.fx:.1f}")
 
+    ba_backend = "isam2" if args.fast else args.ba
     tracker = PnPTracker(camera, extractor=create_extractor(args.detector),
                          matcher=create_matcher(args.matcher),
                          local_window=args.window, local_ba=not args.no_ba,
-                         loop_closure=not args.no_loop)
+                         loop_closure=not args.no_loop,
+                         ba_backend=ba_backend, async_mapping=args.fast)
     # Piso de salud de KF (perilla de re-calibración, v0.45). MEDIDO: es un
     # trade-off dependiente de la secuencia, no una constante universal:
     #   fr1_xyz  → 45: 6.9 cm / 25: 18.4 cm  (bajarlo mete KFs basura, lección 8)
