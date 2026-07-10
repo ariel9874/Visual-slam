@@ -17,6 +17,9 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 compile_commands.json
+# módulo pybind11 compilado (cada máquina compila el suyo: cpp/CMakeLists.txt)
+*.pyd
+*.so
 
 # --- ROS 2 ---
 install/

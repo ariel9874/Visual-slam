@@ -51,6 +51,14 @@ from vslam.mapping.sparse import SparsePointMapper
 # es vectorizada (sin bucle Python) — la base del matching guiado (v0.45).
 _POPCOUNT8 = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint16)
 
+# Núcleo C++ (v0.5): si el módulo compilado está disponible (cpp/ + pybind11),
+# el matching guiado usa la ruta rápida — un gemelo EXACTO de la referencia
+# Python (tests/test_guided_match_cpp.py). Sin él, todo funciona igual en Python.
+try:
+    import vslam_cpp as _fast_cpp
+except ImportError:                                  # pragma: no cover
+    _fast_cpp = None
+
 
 class TrackerBase(ABC):
     """Contrato: recibe frames, devuelve poses; decide keyframes."""
@@ -162,6 +170,9 @@ class PnPTracker(TrackerBase):
         self._desc_matcher = (create_matcher("ratio")
                               if getattr(self.matcher, "name", "") == "lightglue"
                               else self.matcher)
+        # Ruta C++ del matching guiado (v0.5): auto si el módulo compilado
+        # existe; poner False para forzar la referencia Python (equivalencia).
+        self.use_cpp = _fast_cpp is not None
         # Ojo: `mapper or ...` sería un bug — un mapper VACÍO define __len__=0
         # y Python lo evalúa como falsy, creando silenciosamente otro objeto.
         self.mapper = mapper if mapper is not None else SparsePointMapper()
@@ -440,11 +451,32 @@ class PnPTracker(TrackerBase):
         salto), el guiado rinde poco y el llamador cae al matching global.
         """
         cv2 = self._cv2
+        h, w = (self.camera.height or 10 ** 9), (self.camera.width or 10 ** 9)
+
+        # Ruta C++ (v0.5): gemela exacta de lo de abajo, ~2 órdenes más rápida
+        # (era el 37% del frame). tests/test_guided_match_cpp.py verifica la
+        # equivalencia par a par contra esta referencia Python.
+        if self.use_cpp and _fast_cpp is not None and len(map_pts) and len(kps):
+            fn = None
+            if desc.dtype == np.uint8:
+                fn, lim = _fast_cpp.guided_match_hamming, float(self.GUIDED_MAX_HAMMING)
+            elif desc.dtype == np.float32:
+                fn, lim = _fast_cpp.guided_match_l2, float(self.GUIDED_MAX_L2)
+            if fn is not None:
+                kp_xy = np.array([kp.pt for kp in kps], dtype=np.float64)
+                mi, kj, dd = fn(kp_xy, desc, np.asarray(T_pred, np.float64),
+                                np.asarray(map_pts, np.float64), map_desc,
+                                self.camera.fx, self.camera.fy,
+                                self.camera.cx, self.camera.cy,
+                                float(w), float(h),
+                                float(self.GUIDED_RADIUS_PX), lim)
+                return [cv2.DMatch(int(i), int(j), float(d))
+                        for i, j, d in zip(mi, kj, dd)]
+
         T_c_w = invert_se3(T_pred)
         pc = (T_c_w[:3, :3] @ map_pts.T).T + T_c_w[:3, 3]      # mapa en cámara pred.
         uv = self.camera.project(pc)                          # (M, 2)
         kp_xy = np.array([kp.pt for kp in kps], dtype=np.float64)  # (N, 2)
-        h, w = (self.camera.height or 10 ** 9), (self.camera.width or 10 ** 9)
         r2 = self.GUIDED_RADIUS_PX ** 2
         max_dist = self.GUIDED_MAX_HAMMING if desc.dtype == np.uint8 else self.GUIDED_MAX_L2
 
