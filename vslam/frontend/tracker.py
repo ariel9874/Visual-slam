@@ -179,12 +179,20 @@ class PnPTracker(TrackerBase):
         self.local_window = local_window
         self.local_ba = local_ba
         self.loop_closure = loop_closure
-        # Backend del BA (v0.5): "numpy" (referencia didáctica) o "gtsam" (ruta
-        # de rendimiento — el BA era el 57% del tiempo, ver docs/05 §v0.5). Misma
-        # interfaz y mismos números (tests/test_gtsam_ba.py).
+        # Backend del BA (v0.5): "numpy" (referencia didáctica), "gtsam" (batch
+        # C++ — el BA era el 57% del tiempo) o "isam2" (INCREMENTAL: ~14 ms/KF
+        # constantes vs ~300 del batch; ver gtsam_isam2.py). El BA global
+        # offline usa siempre la variante batch correspondiente.
+        self._isam2 = None
+        self._isam2_cursor: Dict[int, int] = {}
         if ba_backend == "gtsam":
             from vslam.backend.gtsam_ba import gtsam_bundle_adjustment
             self._ba = gtsam_bundle_adjustment
+        elif ba_backend == "isam2":
+            from vslam.backend.gtsam_ba import gtsam_bundle_adjustment
+            from vslam.backend.gtsam_isam2 import ISAM2LocalBA
+            self._isam2 = ISAM2LocalBA(camera)
+            self._ba = gtsam_bundle_adjustment   # GBA offline: batch
         else:
             self._ba = local_bundle_adjustment
         self._kf_ids: list = []          # keyframes en orden de inserción
@@ -681,29 +689,46 @@ class PnPTracker(TrackerBase):
         window = self._kf_ids[-self.BA_WINDOW:]
         if len(window) < 3:
             return
-        obs = self.mapper.observations(window)
-        if len(obs) < 60:
-            return
-        kf_poses = {k: self.mapper.keyframe_pose(k) for k in window}
-        # Solo se optimizan puntos con ≥ 2 observaciones DENTRO de la ventana:
-        # con una, el punto es libre a lo largo de su rayo (sub-determinado).
-        counts: dict = {}
-        for _, pid, _ in obs:
-            counts[pid] = counts.get(pid, 0) + 1
-        points = self.mapper.point_positions(
-            {pid for pid, c in counts.items() if c >= 2})
-        opt_poses, opt_points = self._ba(
-            self.camera, kf_poses, points, obs, fixed_kfs=set(window[:2]),
-            iterations=self.BA_ITERATIONS)
+        if self._isam2 is not None:
+            # Ruta INCREMENTAL (iSAM2, v0.5): alimentar solo las observaciones
+            # NUEVAS desde la última llamada. Cursores sobre las listas
+            # append-only del mapper (_obs crudo: la vista filtrada de
+            # observations() encoge con el culling y rompería los índices).
+            new_obs = []
+            for kf, entries in self.mapper._obs.items():
+                start = self._isam2_cursor.get(kf, 0)
+                if start < len(entries):
+                    new_obs.extend((kf, pid, uv) for pid, uv in entries[start:])
+                    self._isam2_cursor[kf] = len(entries)
+            result = self._isam2.process_keyframe(self.mapper, window, new_obs)
+            if result is None:
+                return          # update fallido: seguir con la pose del PnP
+            opt_poses, opt_points = result
+        else:
+            obs = self.mapper.observations(window)
+            if len(obs) < 60:
+                return
+            kf_poses = {k: self.mapper.keyframe_pose(k) for k in window}
+            # Solo se optimizan puntos con ≥ 2 observaciones DENTRO de la
+            # ventana: con una, el punto se desliza por su rayo (sub-determinado).
+            counts: dict = {}
+            for _, pid, _ in obs:
+                counts[pid] = counts.get(pid, 0) + 1
+            points = self.mapper.point_positions(
+                {pid for pid, c in counts.items() if c >= 2})
+            opt_poses, opt_points = self._ba(
+                self.camera, kf_poses, points, obs, fixed_kfs=set(window[:2]),
+                iterations=self.BA_ITERATIONS)
 
         for k, T in opt_poses.items():
             self.mapper.set_keyframe_pose(k, T)
         self.mapper.set_point_positions(opt_points)
         # El keyframe recién insertado ES el frame actual: heredar su refinado.
         cur = self._kf["id"]
-        self.T_w_c = opt_poses[cur].copy()
-        self._T_prev = self.T_w_c.copy()
-        self._kf["T"] = self.T_w_c.copy()
+        if cur in opt_poses:
+            self.T_w_c = opt_poses[cur].copy()
+            self._T_prev = self.T_w_c.copy()
+            self._kf["T"] = self.T_w_c.copy()
 
     def _match_against_kf(self, old, gray, kps, desc):
         """Empareja el frame actual contra un keyframe de la base y lo verifica
@@ -877,6 +902,10 @@ class PnPTracker(TrackerBase):
         self.T_w_c = self.mapper.keyframe_pose(cur_id)
         self._T_prev = self.T_w_c.copy()
         self._kf["T"] = self.T_w_c.copy()
+        if self._isam2 is not None:
+            # La corrección Sim(3) reescribió poses y puntos FUERA de iSAM2:
+            # su linealización quedó obsoleta → época nueva (ver gtsam_isam2).
+            self._isam2.reset()
 
         # EL PUENTE DE COVISIBILIDAD: los pares verificados del bucle se
         # registran como observaciones del keyframe actual → a partir de aquí
