@@ -32,6 +32,8 @@ métodos DIRECTOS (DSO generaliza esta idea a pose + profundidades).
 
 from __future__ import annotations
 
+import queue
+import threading
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, Tuple
 
@@ -144,7 +146,8 @@ class PnPTracker(TrackerBase):
                  local_window: Optional[int] = None,
                  local_ba: bool = True,
                  loop_closure: bool = False,
-                 ba_backend: str = "numpy") -> None:
+                 ba_backend: str = "numpy",
+                 async_mapping: bool = False) -> None:
         """Args (además del frontend intercambiable):
             local_window: si se da, el matching 3D-2D usa solo los puntos de
                 los últimos N keyframes (mapa LOCAL: costo acotado, pero la
@@ -173,6 +176,26 @@ class PnPTracker(TrackerBase):
         # Ruta C++ del matching guiado (v0.5): auto si el módulo compilado
         # existe; poner False para forzar la referencia Python (equivalencia).
         self.use_cpp = _fast_cpp is not None
+
+        # HILO DE MAPEO (v0.5, arquitectura ORB-SLAM): con async_mapping=True,
+        # el bloque pesado del keyframe (BA + cierre de bucle + culling — el
+        # perfil lo midió en ~320 ms, dominado por el matching del bucle) corre
+        # en un worker; el hilo de tracking solo triangula e inserta (~40 ms).
+        # El lock protege las SECCIONES DE ESCRITURA/LECTURA del mapa (los
+        # cómputos pesados corren fuera de él); en modo síncrono queda sin
+        # contención (coste despreciable). Las correcciones grandes del worker
+        # (bucle) llegan al tracking como un DELTA pendiente que se aplica al
+        # inicio del siguiente frame (mismo patrón que reloc/GBA).
+        self.async_mapping = async_mapping
+        self._map_lock = threading.RLock()
+        self._pending_pose_delta: Optional[np.ndarray] = None
+        self.map_failures = 0            # excepciones capturadas del worker
+        self._map_queue: Optional[queue.Queue] = None
+        if async_mapping:
+            self._map_queue = queue.Queue()
+            self._map_thread = threading.Thread(
+                target=self._mapping_worker, daemon=True, name="vslam-mapping")
+            self._map_thread.start()
         # Ojo: `mapper or ...` sería un bug — un mapper VACÍO define __len__=0
         # y Python lo evalúa como falsy, creando silenciosamente otro objeto.
         self.mapper = mapper if mapper is not None else SparsePointMapper()
@@ -239,6 +262,15 @@ class PnPTracker(TrackerBase):
         """Procesa un frame; devuelve (T_w_c, info) — misma forma que el
         pipeline del ejemplo 01, para poder compararlos en el benchmark."""
         self._frame_idx += 1
+        # Corrección pendiente del worker de mapeo (cierre de bucle async): el
+        # mundo se movió bajo nuestros pies → transformar el estado del tracking
+        # al marco corregido y descartar la velocidad (ya no vale).
+        delta = self._pending_pose_delta
+        if delta is not None:
+            self._pending_pose_delta = None
+            self.T_w_c = delta @ self.T_w_c
+            self._T_prev = delta @ self._T_prev
+            self._T_rel = np.eye(4)
         kps, desc = self.extractor.detect_and_compute(gray)
         info = {"n_kps": len(kps), "n_matches": 0, "n_inliers": 0,
                 "tracked": False, "state": "", "n_map": len(self.mapper),
@@ -511,8 +543,10 @@ class PnPTracker(TrackerBase):
 
     def _track_step(self, gray, kps, desc, info) -> None:
         info["state"] = "TRACK"
-        # Mapa global (v0.2) o LOCAL por recencia+covisibilidad (v0.4).
-        ids, map_pts, map_desc = self.mapper.snapshot(self._local_kfs())
+        # Mapa global (v0.2) o LOCAL por recencia+covisibilidad (v0.4). El lock
+        # evita leer el mapa a medio corregir por el worker de mapeo (async).
+        with self._map_lock:
+            ids, map_pts, map_desc = self.mapper.snapshot(self._local_kfs())
 
         # Matching GUIADO por reproyección (v0.45) si hay prior de movimiento;
         # si rinde poco (tras reloc, salto, o al inicio), CAE al global por
@@ -629,7 +663,8 @@ class PnPTracker(TrackerBase):
             # textura densa los descriptores vecinos están correlacionados y
             # envenenaba el BA: ATE 8 → 202 cm).
             if valid.any():
-                _, map_pts, _ = self.mapper.snapshot(self._local_kfs())
+                with self._map_lock:
+                    _, map_pts, _ = self.mapper.snapshot(self._local_kfs())
                 if len(map_pts):
                     cam = self.T_w_c[:3, 3]
                     for n in np.flatnonzero(valid):
@@ -639,23 +674,26 @@ class PnPTracker(TrackerBase):
                             valid[n] = False
             if valid.any():
                 idx_curr = np.array([m.trainIdx for m in fresh])[valid]
-                ids = self.mapper.add_points(points_w[valid], desc[idx_curr],
-                                             anchor_kf_id=kf_id)
+                with self._map_lock:
+                    ids = self.mapper.add_points(points_w[valid], desc[idx_curr],
+                                                 anchor_kf_id=kf_id)
+                    # Registrar TAMBIÉN la observación en el keyframe previo (el
+                    # otro extremo de la triangulación). Sin ella el punto queda
+                    # con una sola observación y el BA puede deslizarlo libremente
+                    # a lo largo de su rayo visual (C_p de rango 2: 3 incógnitas,
+                    # 2 ecuaciones) — lo medimos: el BA EMPEORABA el ATE por esto.
+                    self.mapper.add_observations(kf["id"], ids, pts0[valid])
                 mp.update(dict(zip(idx_curr.tolist(), ids)))
-                # Registrar TAMBIÉN la observación en el keyframe previo (el
-                # otro extremo de la triangulación). Sin ella el punto queda
-                # con una sola observación y el BA puede deslizarlo libremente
-                # a lo largo de su rayo visual (C_p de rango 2: 3 incógnitas,
-                # 2 ecuaciones) — lo medimos: el BA EMPEORABA el ATE por esto.
-                self.mapper.add_observations(kf["id"], ids, pts0[valid])
 
-        self.mapper.integrate_keyframe(Frame(frame_id=kf_id, timestamp=0.0,
-                                             T_w_c=self.T_w_c.copy(), is_keyframe=True))
-        if mp:
-            kp_idx = list(mp.keys())
-            self.mapper.add_observations(
-                kf_id, list(mp.values()),
-                np.float64([kps[i].pt for i in kp_idx]))
+        with self._map_lock:
+            self.mapper.integrate_keyframe(Frame(frame_id=kf_id, timestamp=0.0,
+                                                 T_w_c=self.T_w_c.copy(),
+                                                 is_keyframe=True))
+            if mp:
+                kp_idx = list(mp.keys())
+                self.mapper.add_observations(
+                    kf_id, list(mp.values()),
+                    np.float64([kps[i].pt for i in kp_idx]))
         self._kf_ids.append(kf_id)
         self._local_ref_kf = None        # un KF nuevo re-centra el mapa local por recencia
         self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
@@ -664,6 +702,13 @@ class PnPTracker(TrackerBase):
         self._kf_inliers = max(info["n_inliers"], 1)
         self._frames_since_kf = 0
         info["state"] = "TRACK+KF"
+
+        if self.async_mapping:
+            # HILO DE MAPEO (v0.5): BA + bucle + culling van al worker. Se pasa
+            # el mp del KF (el worker lo necesita para la escala del bucle) —
+            # self._kf habrá avanzado cuando el job se procese.
+            self._map_queue.put((gray, kps, desc, kf_id, mp))
+            return
 
         if self.local_ba:
             self._run_local_ba()
@@ -675,9 +720,49 @@ class PnPTracker(TrackerBase):
         # siempre triangulaciones espurias. Adelgaza el mapa sin tocar la zona
         # activa (la ventana de gracia protege lo recién creado). Ver
         # SparsePointMapper.cull_points para el criterio y la medición.
-        self.mapper.cull_points(self._kf_ids)
+        with self._map_lock:
+            self.mapper.cull_points(self._kf_ids)
 
-    def _run_local_ba(self) -> None:
+    # ── hilo de mapeo (v0.5) ──────────────────────────────────────────────────
+
+    def _mapping_worker(self) -> None:
+        """Consume jobs de keyframe: BA local + cierre de bucle + culling —
+        exactamente lo que el modo síncrono hace inline (~320 ms medidos, con
+        el matching del bucle como pieza dominante), pero sin bloquear el hilo
+        de tracking. Una excepción aquí NO tira el sistema: se cuenta en
+        map_failures y ese keyframe queda sin refinar (el tracking sigue)."""
+        while True:
+            job = self._map_queue.get()
+            try:
+                if job is None:
+                    return                           # sentinela de apagado
+                gray, kps, desc, kf_id, mp = job
+                if self.local_ba:
+                    self._run_local_ba(sync=False)
+                if self.loop_closure:
+                    self._try_close_loop(gray, kps, desc, {"state": ""},
+                                         cur_id=kf_id, cur_mp=mp)
+                with self._map_lock:
+                    self.mapper.cull_points(self._kf_ids)
+            except Exception:                        # noqa: BLE001
+                self.map_failures += 1
+            finally:
+                self._map_queue.task_done()
+
+    def wait_mapping(self) -> None:
+        """Drena la cola del hilo de mapeo. Llamar antes de leer los resultados
+        finales (keyframe_trajectory / evaluación); global_bundle_adjustment lo
+        hace solo. En modo síncrono es un no-op."""
+        if self.async_mapping and self._map_queue is not None:
+            self._map_queue.join()
+
+    def stop_mapping(self) -> None:
+        """Apaga el worker (opcional: es daemon; útil en tests/benchmarks)."""
+        if self.async_mapping and self._map_queue is not None:
+            self._map_queue.put(None)
+            self._map_thread.join(timeout=30.0)
+
+    def _run_local_ba(self, sync: bool = True) -> None:
         """Bundle adjustment sobre la ventana de keyframes recientes.
 
         Se anclan los DOS keyframes más viejos de la ventana: uno fija
@@ -685,6 +770,12 @@ class PnPTracker(TrackerBase):
         tiene 7 grados de libertad (la lección medida en bundle_adjustment.py).
         Simplificación v0.35: las observaciones desde keyframes fuera de la
         ventana no participan (ORB-SLAM las incluye como cámaras fijas).
+
+        `sync=False` (worker de mapeo): NO tocar el estado del tracking
+        (T_w_c/_T_prev/_kf) — el tracking ya avanzó; heredar aquí una pose
+        vieja sería un teletransporte hacia atrás. El refinado llega al
+        tracking por la vía correcta: el PnP es una medición ABSOLUTA contra
+        el mapa, y el mapa sí queda refinado.
         """
         window = self._kf_ids[-self.BA_WINDOW:]
         if len(window) < 3:
@@ -694,38 +785,45 @@ class PnPTracker(TrackerBase):
             # NUEVAS desde la última llamada. Cursores sobre las listas
             # append-only del mapper (_obs crudo: la vista filtrada de
             # observations() encoge con el culling y rompería los índices).
-            new_obs = []
-            for kf, entries in self.mapper._obs.items():
-                start = self._isam2_cursor.get(kf, 0)
-                if start < len(entries):
-                    new_obs.extend((kf, pid, uv) for pid, uv in entries[start:])
-                    self._isam2_cursor[kf] = len(entries)
-            result = self._isam2.process_keyframe(self.mapper, window, new_obs)
+            # El lock cubre lectura de cursores + update + write-back: el
+            # update (~34 ms) bloquea a lo sumo un snapshot del tracking.
+            with self._map_lock:
+                new_obs = []
+                for kf, entries in self.mapper._obs.items():
+                    start = self._isam2_cursor.get(kf, 0)
+                    if start < len(entries):
+                        new_obs.extend((kf, pid, uv) for pid, uv in entries[start:])
+                        self._isam2_cursor[kf] = len(entries)
+                result = self._isam2.process_keyframe(self.mapper, window, new_obs)
             if result is None:
                 return          # update fallido: seguir con la pose del PnP
             opt_poses, opt_points = result
         else:
-            obs = self.mapper.observations(window)
-            if len(obs) < 60:
-                return
-            kf_poses = {k: self.mapper.keyframe_pose(k) for k in window}
-            # Solo se optimizan puntos con ≥ 2 observaciones DENTRO de la
-            # ventana: con una, el punto se desliza por su rayo (sub-determinado).
-            counts: dict = {}
-            for _, pid, _ in obs:
-                counts[pid] = counts.get(pid, 0) + 1
-            points = self.mapper.point_positions(
-                {pid for pid, c in counts.items() if c >= 2})
+            with self._map_lock:
+                obs = self.mapper.observations(window)
+                if len(obs) < 60:
+                    return
+                kf_poses = {k: self.mapper.keyframe_pose(k) for k in window}
+                # Solo se optimizan puntos con ≥ 2 observaciones DENTRO de la
+                # ventana: con una, el punto se desliza por su rayo.
+                counts: dict = {}
+                for _, pid, _ in obs:
+                    counts[pid] = counts.get(pid, 0) + 1
+                points = self.mapper.point_positions(
+                    {pid for pid, c in counts.items() if c >= 2})
+            # El solve (lo pesado) corre FUERA del lock: el tracking sigue.
             opt_poses, opt_points = self._ba(
                 self.camera, kf_poses, points, obs, fixed_kfs=set(window[:2]),
                 iterations=self.BA_ITERATIONS)
 
-        for k, T in opt_poses.items():
-            self.mapper.set_keyframe_pose(k, T)
-        self.mapper.set_point_positions(opt_points)
-        # El keyframe recién insertado ES el frame actual: heredar su refinado.
+        with self._map_lock:
+            for k, T in opt_poses.items():
+                self.mapper.set_keyframe_pose(k, T)
+            self.mapper.set_point_positions(opt_points)
+        # El keyframe recién insertado ES el frame actual: heredar su refinado
+        # (solo en modo síncrono — ver docstring).
         cur = self._kf["id"]
-        if cur in opt_poses:
+        if sync and cur in opt_poses:
             self.T_w_c = opt_poses[cur].copy()
             self._T_prev = self.T_w_c.copy()
             self._kf["T"] = self.T_w_c.copy()
@@ -746,7 +844,8 @@ class PnPTracker(TrackerBase):
                  if m.queryIdx in old["mp"]]
         if len(pairs) < self.LOOP_MIN_INLIERS:
             return len(matches), pairs, None, None
-        positions = self.mapper.point_positions(pid for pid, _ in pairs)
+        with self._map_lock:
+            positions = self.mapper.point_positions(pid for pid, _ in pairs)
         obj = np.array([positions[pid] for pid, _ in pairs])
         img = np.float64([kps[t].pt for _, t in pairs])
         T_pnp, inliers = solve_pnp(self.camera, obj, img)
@@ -778,6 +877,7 @@ class PnPTracker(TrackerBase):
         reparte por la cadena. Medido en fr2_desk (trayectoria final): 4.8→2.0 cm.
         Gauge: se fijan los 2 KFs más viejos (baseline → ancla escala, §BA).
         """
+        self.wait_mapping()          # drenar el hilo de mapeo antes del full BA
         kfs = list(self._kf_ids)
         if len(kfs) < 3:
             return
@@ -797,7 +897,9 @@ class PnPTracker(TrackerBase):
             self.mapper.set_keyframe_pose(k, T)
         self.mapper.set_point_positions(opt_points)
 
-    def _try_close_loop(self, gray, kps, desc, info) -> None:
+    def _try_close_loop(self, gray, kps, desc, info,
+                        cur_id: Optional[int] = None,
+                        cur_mp: Optional[dict] = None) -> None:
         """Cierre de bucle en tres actos (el pipeline canónico del SLAM):
 
         1. RECONOCIMIENTO DE LUGAR: ¿este keyframe se parece a uno antiguo?
@@ -825,7 +927,13 @@ class PnPTracker(TrackerBase):
         """
         if self._frame_idx - self._last_loop_frame < self.LOOP_COOLDOWN:
             return
-        cur_id = self._kf["id"]
+        # En modo async el job trae SU keyframe (self._kf ya avanzó); en modo
+        # síncrono cur_id/cur_mp son los del keyframe actual.
+        async_job = cur_id is not None
+        if cur_id is None:
+            cur_id = self._kf["id"]
+        if cur_mp is None:
+            cur_mp = self._kf["mp"]
 
         # 1+2) Reconocimiento de lugar + verificación geométrica en un solo
         # paso, vía el helper compartido con la relocalización (§_match_against_kf).
@@ -858,14 +966,15 @@ class PnPTracker(TrackerBase):
         # bucle) y a otro del NUEVO (por el tracking local): esos pares de
         # nubes 3D definen la similitud entre gauges.
         loop_by_kp = {kp: pid for (pid, kp), ok in zip(pairs, inliers) if ok}
-        shared = [(self._kf["mp"][kp], pid_old)
+        shared = [(cur_mp[kp], pid_old)
                   for kp, pid_old in loop_by_kp.items()
-                  if kp in self._kf["mp"] and self._kf["mp"][kp] != pid_old]
+                  if kp in cur_mp and cur_mp[kp] != pid_old]
 
         if len(shared) >= 10:
             from vslam.evaluation import umeyama_alignment
-            pos_new = self.mapper.point_positions(pid for pid, _ in shared)
-            pos_old = self.mapper.point_positions(pid for _, pid in shared)
+            with self._map_lock:
+                pos_new = self.mapper.point_positions(pid for pid, _ in shared)
+                pos_old = self.mapper.point_positions(pid for _, pid in shared)
             X_new = np.array([pos_new[pid] for pid, _ in shared])
             X_old = np.array([pos_old[pid] for _, pid in shared])
             s_rel, _, _ = umeyama_alignment(X_new, X_old)   # escala nuevo→viejo
@@ -879,15 +988,17 @@ class PnPTracker(TrackerBase):
         # entran como SE(3) embebida (s = 1); la odometría asegura suavidad
         # de escala entre vecinos; el factor de bucle asegura la pose medida
         # por PnP Y la escala medida por Umeyama.
-        poses = {k: self.mapper.keyframe_pose(k) for k in self._kf_ids}
+        with self._map_lock:
+            kf_ids_snap = list(self._kf_ids)
+            poses = {k: self.mapper.keyframe_pose(k) for k in kf_ids_snap}
         graph = GaussNewtonPoseGraph("sim3")
         # TODO el segmento antiguo queda FIJO (≤ keyframe del bucle): el
         # cierre corrige al recién llegado, no reescribe el mundo — mover la
         # referencia dejaría la historia ya emitida en otro marco (medido:
         # con solo el nodo 0 fijo, el ATE con BA empeoraba de 6.7 a 87 cm).
-        for k in self._kf_ids:
+        for k in kf_ids_snap:
             graph.add_pose(k, poses[k], fixed=(k <= old["id"]))
-        for a, b in zip(self._kf_ids[:-1], self._kf_ids[1:]):
+        for a, b in zip(kf_ids_snap[:-1], kf_ids_snap[1:]):
             graph.add_odometry_factor(a, b, invert_se3(poses[a]) @ poses[b],
                                       np.eye(7) * 1e2)
         S_cur_meas = np.eye(4)
@@ -897,27 +1008,37 @@ class PnPTracker(TrackerBase):
                               invert_se3(poses[old["id"]]) @ S_cur_meas,
                               np.eye(7) * 1e4)
 
-        optimized = graph.optimize(iterations=20)
-        self.mapper.update_poses_sim3(optimized)     # re-ancla y RE-ESCALA
-        self.T_w_c = self.mapper.keyframe_pose(cur_id)
-        self._T_prev = self.T_w_c.copy()
-        self._kf["T"] = self.T_w_c.copy()
+        optimized = graph.optimize(iterations=20)     # lo pesado, fuera del lock
+        with self._map_lock:
+            T_old = poses[cur_id]
+            self.mapper.update_poses_sim3(optimized)  # re-ancla y RE-ESCALA
+            T_new = self.mapper.keyframe_pose(cur_id)
+            # EL PUENTE DE COVISIBILIDAD: los pares verificados del bucle se
+            # registran como observaciones del keyframe del bucle → los
+            # keyframes ANTIGUOS de esta zona vuelven a ser covisibles, sus
+            # puntos entran al mapa local, y el tracking re-usa la geometría
+            # original en lugar de duplicarla (la causa del PnP biestable).
+            bridge = [(pid, kp) for (pid, kp), ok in zip(pairs, inliers) if ok]
+            self.mapper.add_observations(
+                cur_id, [pid for pid, _ in bridge],
+                np.float64([kps[kp].pt for _, kp in bridge]))
+        if async_job:
+            # El tracking ya avanzó: entregarle la corrección como DELTA en el
+            # marco del mundo (T_nuevo·T_viejo⁻¹ del KF del bucle); la aplica
+            # al inicio de su siguiente frame. El delta es rígido (las poses
+            # se re-normalizan a SE(3)); la escala vive en el MAPA y el PnP la
+            # absorbe — la convención de siempre (v0.4a).
+            self._pending_pose_delta = T_new @ invert_se3(T_old)
+        else:
+            self.T_w_c = T_new
+            self._T_prev = self.T_w_c.copy()
+            self._kf["T"] = self.T_w_c.copy()
         if self._isam2 is not None:
             # La corrección Sim(3) reescribió poses y puntos FUERA de iSAM2:
             # su linealización quedó obsoleta → época nueva (ver gtsam_isam2).
             self._isam2.reset()
-
-        # EL PUENTE DE COVISIBILIDAD: los pares verificados del bucle se
-        # registran como observaciones del keyframe actual → a partir de aquí
-        # los keyframes ANTIGUOS de esta zona son covisibles, sus puntos
-        # entran al mapa local, y el tracking re-usa la geometría original en
-        # lugar de duplicarla (la causa medida del PnP biestable).
-        bridge = [(pid, kp) for (pid, kp), ok in zip(pairs, inliers) if ok]
-        self.mapper.add_observations(
-            cur_id, [pid for pid, _ in bridge],
-            np.float64([kps[kp].pt for _, kp in bridge]))
         for kp, pid in loop_by_kp.items():
-            self._kf["mp"].setdefault(kp, pid)
+            cur_mp.setdefault(kp, pid)
 
         self._last_loop_frame = self._frame_idx
         self.loop_events.append((self._frame_idx, old["id"]))

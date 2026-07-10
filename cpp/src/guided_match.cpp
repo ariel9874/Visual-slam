@@ -94,49 +94,58 @@ std::tuple<py::array_t<int>, py::array_t<int>, py::array_t<double>> guided_match
   const int D = static_cast<int>(de.shape(1));
   const double r2 = radius_px * radius_px;
 
-  // T_c_w = T_pred⁻¹ (SE(3)): R_c_w = Rᵀ, t_c_w = −Rᵀ·t.
-  double R[3][3], t[3];
-  for (int r = 0; r < 3; ++r)
-    for (int c = 0; c < 3; ++c) R[r][c] = T(c, r);   // transpuesta
-  for (int r = 0; r < 3; ++r)
-    t[r] = -(R[r][0] * T(0, 3) + R[r][1] * T(1, 3) + R[r][2] * T(2, 3));
-
-  std::vector<Cand> cands;
-  cands.reserve(static_cast<std::size_t>(M) / 2);
-  for (int i = 0; i < M; ++i) {
-    const double xw = mp(i, 0), yw = mp(i, 1), zw = mp(i, 2);
-    const double xc = R[0][0] * xw + R[0][1] * yw + R[0][2] * zw + t[0];
-    const double yc = R[1][0] * xw + R[1][1] * yw + R[1][2] * zw + t[1];
-    const double zc = R[2][0] * xw + R[2][1] * yw + R[2][2] * zw + t[2];
-    if (zc <= 1e-6) continue;
-    const double u = fx * xc / zc + cx;
-    const double v = fy * yc / zc + cy;
-    if (u < 0.0 || u >= width || v < 0.0 || v >= height) continue;
-
-    // argmin de distancia entre los keypoints dentro del radio; ante empate
-    // gana el índice menor (semántica de np.argmin sobre el subconjunto).
-    double best = -1.0;
-    int best_j = -1;
-    for (int j = 0; j < N; ++j) {
-      const double dx = kp(j, 0) - u, dy = kp(j, 1) - v;
-      if (dx * dx + dy * dy > r2) continue;
-      const double dist = desc_distance(&md(i, 0), &de(j, 0), D);
-      if (best_j < 0 || dist < best) { best = dist; best_j = j; }
-    }
-    if (best_j >= 0 && best <= max_dist) cands.push_back({best, i, best_j});
-  }
-
-  std::sort(cands.begin(), cands.end());
-  std::vector<char> used_mp(M, 0), used_kp(N, 0);
   std::vector<int> out_i, out_j;
   std::vector<double> out_d;
-  for (const Cand& c : cands) {
-    if (used_mp[c.i] || used_kp[c.j]) continue;
-    used_mp[c.i] = 1;
-    used_kp[c.j] = 1;
-    out_i.push_back(c.i);
-    out_j.push_back(c.j);
-    out_d.push_back(c.dist);
+  {
+    // Soltar el GIL durante el cómputo (v0.5, hilo de mapeo): los accesos
+    // `unchecked` ya no tocan la API de Python, así que el matching corre en
+    // paralelo con el worker de mapeo (BA/bucle) sin bloquearse mutuamente.
+    // OJO: el bloque termina ANTES de construir los arrays de salida — crear
+    // objetos Python sin el GIL es ilegal.
+    py::gil_scoped_release release;
+
+    // T_c_w = T_pred⁻¹ (SE(3)): R_c_w = Rᵀ, t_c_w = −Rᵀ·t.
+    double R[3][3], t[3];
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c) R[r][c] = T(c, r);   // transpuesta
+    for (int r = 0; r < 3; ++r)
+      t[r] = -(R[r][0] * T(0, 3) + R[r][1] * T(1, 3) + R[r][2] * T(2, 3));
+
+    std::vector<Cand> cands;
+    cands.reserve(static_cast<std::size_t>(M) / 2);
+    for (int i = 0; i < M; ++i) {
+      const double xw = mp(i, 0), yw = mp(i, 1), zw = mp(i, 2);
+      const double xc = R[0][0] * xw + R[0][1] * yw + R[0][2] * zw + t[0];
+      const double yc = R[1][0] * xw + R[1][1] * yw + R[1][2] * zw + t[1];
+      const double zc = R[2][0] * xw + R[2][1] * yw + R[2][2] * zw + t[2];
+      if (zc <= 1e-6) continue;
+      const double u = fx * xc / zc + cx;
+      const double v = fy * yc / zc + cy;
+      if (u < 0.0 || u >= width || v < 0.0 || v >= height) continue;
+
+      // argmin de distancia entre los keypoints dentro del radio; ante empate
+      // gana el índice menor (semántica de np.argmin sobre el subconjunto).
+      double best = -1.0;
+      int best_j = -1;
+      for (int j = 0; j < N; ++j) {
+        const double dx = kp(j, 0) - u, dy = kp(j, 1) - v;
+        if (dx * dx + dy * dy > r2) continue;
+        const double dist = desc_distance(&md(i, 0), &de(j, 0), D);
+        if (best_j < 0 || dist < best) { best = dist; best_j = j; }
+      }
+      if (best_j >= 0 && best <= max_dist) cands.push_back({best, i, best_j});
+    }
+
+    std::sort(cands.begin(), cands.end());
+    std::vector<char> used_mp(M, 0), used_kp(N, 0);
+    for (const Cand& c : cands) {
+      if (used_mp[c.i] || used_kp[c.j]) continue;
+      used_mp[c.i] = 1;
+      used_kp[c.j] = 1;
+      out_i.push_back(c.i);
+      out_j.push_back(c.j);
+      out_d.push_back(c.dist);
+    }
   }
 
   const py::ssize_t K = static_cast<py::ssize_t>(out_i.size());

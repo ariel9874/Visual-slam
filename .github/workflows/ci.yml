@@ -35,7 +35,7 @@ jobs:
           for t in test_pose_recovery test_frontends test_triangulation_pnp \
                    test_pose_graph test_bundle_adjustment test_camera_distortion \
                    test_euroc_loader test_gtsam_ba test_guided_match_cpp \
-                   test_isam2_ba; do
+                   test_isam2_ba test_async_mapping; do
             echo "==== $t ===="
             python "tests/$t.py"
           done
