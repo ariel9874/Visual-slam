@@ -45,11 +45,17 @@ def gtsam_bundle_adjustment(
     fixed_kfs: Set[int],
     iterations: int = 8,
     huber_px: float = 2.5,
+    stereo_bf: float = 0.0,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
     """BA con GTSAM. Firma IDÉNTICA a `local_bundle_adjustment` (intercambiables).
 
     Devuelve ({kf_id: T_w_c}, {point_id: posición}); las variables sin
     observaciones (o puntos con < 2 obs) salen sin tocar, como en la referencia.
+
+    `stereo_bf` se ACEPTA pero aún no se usa (deuda v0.6): el residuo de
+    profundidad RGB-D vive en la referencia NumPy; portarlo aquí es
+    `GenericStereoFactor3D` + `Cal3_S2Stereo` (el píxel (3,) ya trae u_R).
+    Mientras tanto se proyecta con [u, v] — paridad monocular intacta.
     """
     try:
         import gtsam
@@ -84,7 +90,8 @@ def gtsam_bundle_adjustment(
         x = pts[p]
         initial.insert(L(p), gtsam.Point3(float(x[0]), float(x[1]), float(x[2])))
     for k, p, uv in obs:
-        graph.add(gtsam.GenericProjectionFactorCal3_S2(uv, robust, X(k), L(p), K))
+        # uv[:2]: las observaciones RGB-D (v0.6) traen [u, v, u_R] — ver docstring.
+        graph.add(gtsam.GenericProjectionFactorCal3_S2(uv[:2], robust, X(k), L(p), K))
     # Anclar el gauge: prior fuerte sobre los KFs fijos (≈ fijarlos).
     prior_noise = gtsam.noiseModel.Isotropic.Sigma(6, 1e-6)
     for k in fixed_kfs & used_kfs:

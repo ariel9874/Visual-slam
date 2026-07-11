@@ -90,18 +90,30 @@ def _read_tum_index(path: Path) -> List[Tuple[float, str]]:
 
 
 class TUMRGBDLoader:
-    """Itera (timestamp, imagen_gris) sobre una secuencia TUM RGB-D.
+    """Itera sobre una secuencia TUM RGB-D: (timestamp, gris) o, con
+    `with_depth=True` (v0.6), (timestamp, gris, profundidad_en_metros).
 
     A diferencia de ImageSequenceLoader, respeta los TIMESTAMPS REALES del
     archivo rgb.txt (la cámara no captura a fps constante) — imprescindible para
-    asociar el ground truth de la mocap, que corre a otra frecuencia. Solo se
-    usa el canal RGB (monocular); la profundidad queda para v0.6 (RGB-D).
+    asociar el ground truth de la mocap, que corre a otra frecuencia.
+
+    Profundidad (v0.6): depth.txt se asocia al RGB por timestamp más cercano
+    (Kinect: RGB y profundidad son sensores distintos, no sincronizados). Los
+    PNG son uint16 con FACTOR 5000 (convención TUM: 5000 = 1 m); 0 = SIN DATO
+    (sombras del proyector IR, superficies especulares, fuera de rango). Se
+    devuelve float32 en METROS con NaN→0.0 implícito (0 sigue siendo "sin dato").
 
     Args:
-        root: carpeta de la secuencia (contiene rgb.txt, rgb/, groundtruth.txt).
+        root: carpeta de la secuencia (rgb.txt, rgb/, [depth.txt, depth/]).
+        with_depth: emitir también el mapa de profundidad asociado.
+        max_depth_dt: descartar la profundidad si el par más cercano dista más
+            de esto (s) — el frame se emite con depth=None.
     """
 
-    def __init__(self, root: str | Path) -> None:
+    DEPTH_FACTOR = 5000.0        # convención TUM: valor uint16 / 5000 = metros
+
+    def __init__(self, root: str | Path, with_depth: bool = False,
+                 max_depth_dt: float = 0.05) -> None:
         self.root = Path(root)
         rgb_txt = self.root / "rgb.txt"
         if not rgb_txt.is_file():
@@ -109,6 +121,16 @@ class TUMRGBDLoader:
         self.entries = _read_tum_index(rgb_txt)
         if not self.entries:
             raise FileNotFoundError(f"rgb.txt sin entradas en {self.root}")
+        self.with_depth = with_depth
+        self._depth_of: List[Optional[str]] = [None] * len(self.entries)
+        if with_depth:
+            depth_entries = _read_tum_index(self.root / "depth.txt")
+            d_ts = np.array([t for t, _ in depth_entries])
+            assoc = associate_by_timestamp(self.timestamps, d_ts,
+                                           max_dt=max_depth_dt)
+            for i, j in enumerate(assoc):
+                if j >= 0:
+                    self._depth_of[i] = depth_entries[j][1]
 
     @property
     def timestamps(self) -> np.ndarray:
@@ -117,12 +139,21 @@ class TUMRGBDLoader:
     def __len__(self) -> int:
         return len(self.entries)
 
-    def __iter__(self) -> Iterator[Tuple[float, np.ndarray]]:
-        for ts, rel in self.entries:
+    def __iter__(self) -> Iterator[Tuple]:
+        for i, (ts, rel) in enumerate(self.entries):
             image = cv2.imread(str(self.root / rel), cv2.IMREAD_GRAYSCALE)
             if image is None:
                 raise IOError(f"No se pudo leer la imagen: {self.root / rel}")
-            yield ts, image
+            if not self.with_depth:
+                yield ts, image
+                continue
+            depth = None
+            if self._depth_of[i] is not None:
+                raw = cv2.imread(str(self.root / self._depth_of[i]),
+                                 cv2.IMREAD_UNCHANGED)
+                if raw is not None:
+                    depth = raw.astype(np.float32) / self.DEPTH_FACTOR
+            yield ts, image, depth
 
 
 def read_tum_trajectory(path: str | Path) -> Tuple[np.ndarray, np.ndarray]:

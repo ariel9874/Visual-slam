@@ -166,8 +166,10 @@ class ISAM2LocalBA:
                 self._pose_priors_added += 1
 
         for kf, pid, uv in factors:
+            # [:2]: las observaciones RGB-D (v0.6) traen [u, v, u_R]; el factor
+            # estéreo de iSAM2 es deuda — se proyecta con [u, v] (paridad).
             graph.add(gtsam.GenericProjectionFactorCal3_S2(
-                np.asarray(uv, float), self._robust, X(kf), L(pid), self._K))
+                np.asarray(uv, float)[:2], self._robust, X(kf), L(pid), self._K))
 
         # 4) Update incremental (con red de seguridad: decisión 5).
         try:

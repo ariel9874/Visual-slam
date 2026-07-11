@@ -43,6 +43,23 @@ Con K=5 keyframes el sistema grande (~miles de variables) colapsa a uno de
 30×30. Este truco ES la razón de que el BA escale; g2o/Ceres/GTSAM viven de
 él (y del mismo Schur nace la "marginalización" de la ventana de DSO).
 
+─── La matemática: RGB-D como estéreo virtual (v0.6) ────────────────────────
+El sensor mide z en cada píxel, pero meter z directo al costo mezcla unidades
+(metros vs píxeles) y exige un σ_z aparte. El truco de ORB-SLAM2: convertir la
+profundidad en la coordenada que MEDIRÍA una cámara derecha a baseline b:
+
+    u_R = u − fx·b/z          (fx·b ≡ bf; disparidad d = fx·b/z)
+
+y extender el residuo de [u, v] a [u, v, u_R]. Todo queda en píxeles (misma
+Huber, mismo Schur — solo crecen las filas de los jacobianos) y el peso de la
+profundidad decae solo con la distancia: ∂u_R/∂z = fx·b/z², exactamente el
+inverso del ruido del sensor (que crece ~z² en el Kinect) — la física y la
+geometría se cancelan en la dirección correcta. El residuo extra ancla la
+ESTRUCTURA del mapa a la medición métrica en cada observación: sin él, el BA
+solo re-teje reproyecciones y la deriva métrica de fr1_desk (error REPARTIDO,
+p50 7.8 cm, no un episodio) no tiene de dónde corregirse. Una observación (3,)
+con u_R = NaN significa "este píxel no tenía z válida": residuo 2D normal.
+
 ─── La matemática: el gauge monocular tiene 7 grados, no 6 ──────────────────
 Fijar UNA cámara ancla la rotación y traslación globales (6 gdl), pero en
 monocular queda un séptimo: la ESCALA. La familia  X′ = s·X,  C′_k = s·C_k
@@ -65,20 +82,28 @@ from vslam.core.camera import PinholeCamera
 from vslam.core.geometry import invert_se3
 from vslam.core.lie import hat, se3_exp
 
-Observation = Tuple[int, int, np.ndarray]   # (kf_id, point_id, píxel (2,))
+Observation = Tuple[int, int, np.ndarray]   # (kf_id, point_id, píxel (2,) o
+                                             #  (3,) = [u, v, u_R] RGB-D v0.6)
 
 
-def _residual_and_jacobians(camera, T_c_w, X_w, uv):
-    """Residuo (2,) y jacobianos J_pose (2×6), J_punto (2×3) de UNA observación.
+def _residual_and_jacobians(camera, T_c_w, X_w, uv, bf=0.0):
+    """Residuo y jacobianos de UNA observación: 2D monocular o 3D con la
+    coordenada derecha virtual u_R (RGB-D, teoría arriba; bf = fx·b).
     Devuelve None si el punto cae detrás de la cámara (sin proyección válida)."""
     X_c = T_c_w[:3, :3] @ X_w + T_c_w[:3, 3]
     x, y, z = X_c
     if z < 1e-3:
         return None
-    r = np.array([camera.fx * x / z + camera.cx - uv[0],
-                  camera.fy * y / z + camera.cy - uv[1]])
-    d_pi = np.array([[camera.fx / z, 0.0, -camera.fx * x / z ** 2],
-                     [0.0, camera.fy / z, -camera.fy * y / z ** 2]])
+    r = [camera.fx * x / z + camera.cx - uv[0],
+         camera.fy * y / z + camera.cy - uv[1]]
+    d_pi = [[camera.fx / z, 0.0, -camera.fx * x / z ** 2],
+            [0.0, camera.fy / z, -camera.fy * y / z ** 2]]
+    if bf > 0.0 and len(uv) == 3 and np.isfinite(uv[2]):
+        # Fila estéreo virtual: u_R = fx·x/z + cx − bf/z; su derivada respecto
+        # de z es la de u MÁS bf/z² (el término que hace pesar la profundidad).
+        r.append(camera.fx * x / z + camera.cx - bf / z - uv[2])
+        d_pi.append([camera.fx / z, 0.0, (bf - camera.fx * x) / z ** 2])
+    r, d_pi = np.asarray(r), np.asarray(d_pi)
     J_pose = d_pi @ np.hstack([-np.eye(3), hat(X_c)])   # ∂X_c/∂δ = [−I | [X_c]ₓ]
     J_point = d_pi @ T_c_w[:3, :3]                      # ∂X_c/∂X_w = R_c_w
     return r, J_pose, J_point
@@ -92,6 +117,7 @@ def local_bundle_adjustment(
     fixed_kfs: Set[int],
     iterations: int = 8,
     huber_px: float = 2.5,
+    stereo_bf: float = 0.0,
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
     """Refina poses y puntos minimizando reproyección (LM + Schur, teoría arriba).
 
@@ -104,6 +130,10 @@ def local_bundle_adjustment(
         fixed_kfs: ids anclados. En monocular deben ser ≥ 2 con baseline
             (ver el bloque de gauge en el docstring del módulo): con solo 1,
             la escala queda libre y la solución deriva dentro de esa familia.
+        stereo_bf: fx·b de la cámara derecha virtual (RGB-D/estéreo, teoría
+            arriba). 0 = apagado; con bf > 0 las observaciones (3,) con u_R
+            finita aportan el residuo de profundidad. Debe ser el MISMO bf
+            con el que el tracker fabricó las u_R.
     Returns:
         ({kf_id: T_w_c optimizada}, {point_id: posición optimizada})
     """
@@ -132,7 +162,8 @@ def local_bundle_adjustment(
     def total_cost(poses_, pts_) -> float:
         c = 0.0
         for k, p, uv in obs:
-            out = _residual_and_jacobians(camera, invert_se3(poses_[k]), pts_[p], uv)
+            out = _residual_and_jacobians(camera, invert_se3(poses_[k]), pts_[p],
+                                          uv, stereo_bf)
             if out is None:
                 c += BEHIND_PENALTY
                 continue
@@ -155,7 +186,8 @@ def local_bundle_adjustment(
 
         T_c_w_cache = {k: invert_se3(T) for k, T in poses.items()}
         for k, p, uv in obs:
-            out = _residual_and_jacobians(camera, T_c_w_cache[k], pts[p], uv)
+            out = _residual_and_jacobians(camera, T_c_w_cache[k], pts[p], uv,
+                                          stereo_bf)
             if out is None:
                 continue
             r, J_pose, J_point = out

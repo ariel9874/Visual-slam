@@ -145,6 +145,17 @@ class PnPTracker(TrackerBase):
     BOW_WORDS = 512             # tamaño del vocabulario visual (en sesión)
     BOW_TRAIN_KFS = 5           # entrenar el vocabulario al llegar a este nº de KFs
     BOW_TOP_K = 5               # candidatos que pagan verificación geométrica
+    # ── RGB-D (v0.6) ──
+    DEPTH_MIN = 0.3             # rango útil del sensor (Kinect: 0.3-8 m; fuera
+    DEPTH_MAX = 8.0             # de él la profundidad es ruido o 0 = sin dato)
+    DEPTH_MAX_NEW_POINTS = 400  # tope de puntos nuevos por KF desde profundidad
+    #                             (sin tope, ~1500 kps/KF inflan el mapa; el
+    #                             culling limpia después, pero mejor no crear basura)
+    STEREO_BF = 40.0            # fx·b de la cámara derecha VIRTUAL (px·m): la
+    #                             profundidad entra al BA como u_R = u − bf/z
+    #                             (teoría en bundle_adjustment.py). 40 ≈ fx≈520
+    #                             × b≈7.5 cm del par IR-RGB del Kinect — el
+    #                             mismo valor que usa ORB-SLAM2 para TUM.
 
     def __init__(self, camera: PinholeCamera, extractor=None, matcher=None,
                  mapper: Optional[SparsePointMapper] = None,
@@ -230,6 +241,7 @@ class PnPTracker(TrackerBase):
             self._ba = local_bundle_adjustment
         self._kf_ids: list = []          # keyframes en orden de inserción
         self._kf_db: list = []           # historial para reconocimiento de lugar
+        self._metric = False             # mapa en METROS (init RGB-D, v0.6)
         self._last_loop_frame = -10 ** 9
         self.loop_events: list = []      # [(frame, kf_antiguo)] para informes
         self.reloc_events: list = []     # [(frame, kf_reconocido)] (v0.4b)
@@ -242,6 +254,7 @@ class PnPTracker(TrackerBase):
         self._coast_count = 0            # frames consecutivos en coast (v0.4b)
         self._step_history: list = []    # ||paso|| de poses aceptadas (compuerta)
         self._local_ref_kf: Optional[int] = None  # ancla del mapa local tras reloc
+        self._depth: Optional[np.ndarray] = None  # profundidad del frame (v0.6)
 
         # Referencia de inicialización y último keyframe.
         self._ref: Optional[Tuple[list, np.ndarray]] = None   # (kps, desc)
@@ -268,10 +281,19 @@ class PnPTracker(TrackerBase):
         """
         return [(k, self.mapper.keyframe_pose(k)) for k in self._kf_ids]
 
-    def process_frame(self, gray: np.ndarray) -> Tuple[np.ndarray, Dict]:
+    def process_frame(self, gray: np.ndarray,
+                      depth: Optional[np.ndarray] = None
+                      ) -> Tuple[np.ndarray, Dict]:
         """Procesa un frame; devuelve (T_w_c, info) — misma forma que el
-        pipeline del ejemplo 01, para poder compararlos en el benchmark."""
+        pipeline del ejemplo 01, para poder compararlos en el benchmark.
+
+        `depth` (v0.6, RGB-D): mapa de profundidad en METROS alineado al gris
+        (0 = sin dato). Con él, la inicialización es instantánea y métrica y
+        los puntos nuevos de keyframe nacen por retro-proyección — la escala
+        deja de ser un gauge y pasa a ser una MEDICIÓN.
+        """
         self._frame_idx += 1
+        self._depth = depth
         # Corrección pendiente del worker de mapeo (cierre de bucle async): el
         # mundo se movió bajo nuestros pies → transformar el estado del tracking
         # al marco corregido y descartar la velocidad (ya no vale).
@@ -296,9 +318,65 @@ class PnPTracker(TrackerBase):
 
     # ── fase 1: inicialización 2D-2D + triangulación ──────────────────────────
 
+    def _initialize_rgbd(self, kps, desc, info) -> bool:
+        """INIT RGB-D (v0.6): mapa MÉTRICO instantáneo desde un solo frame.
+
+        ─── La matemática: la escala deja de ser gauge ───
+        En monocular, (T, {X}) y (s·T, {s·X}) explican las mismas imágenes: la
+        escala es un grado de libertad no observable y se FIJA por convención
+        (mediana = 1). La profundidad lo cambia todo: z es una MEDICIÓN en
+        metros, y la retro-proyección  X_c = z·K⁻¹·[u, v, 1]ᵀ  da puntos en la
+        unidad del sensor. Nada de esperar paralaje, nada de matriz esencial,
+        nada de twisted pair (lecciones 1-2 son problemas ESTRICTAMENTE
+        monoculares): el primer frame con profundidad válida YA es un mapa.
+        Los puntos nacen con UNA observación (no hay segunda vista): el BA los
+        excluye hasta que el tracking los re-observe (lección 7) y el buffer de
+        pendientes de iSAM2 los retiene igual — el diseño existente ya cubría
+        este caso.
+        """
+        depth = self._depth
+        h, w = depth.shape
+        px, zs, idx = [], [], []
+        for i, kp in enumerate(kps):
+            u, v = int(round(kp.pt[0])), int(round(kp.pt[1]))
+            if 0 <= u < w and 0 <= v < h:
+                z = float(depth[v, u])
+                if self.DEPTH_MIN < z < self.DEPTH_MAX:
+                    px.append(kp.pt)
+                    zs.append(z)
+                    idx.append(i)
+        if len(idx) < self.MIN_INIT_POINTS:
+            return False                 # profundidad insuficiente: reintentar
+
+        pts_w = self.camera.backproject(np.float64(px), np.float64(zs))
+        kf_id = self._frame_idx          # el mundo ES esta cámara (T = I, metros)
+        with self._map_lock:
+            self.mapper.integrate_keyframe(Frame(frame_id=kf_id, timestamp=0.0,
+                                                 T_w_c=np.eye(4), is_keyframe=True))
+            ids = self.mapper.add_points(pts_w, desc[idx], anchor_kf_id=kf_id)
+            self.mapper.add_observations(kf_id, ids,
+                                         self._with_virtual_right(np.float64(px)))
+        self._kf_ids = [kf_id]
+        mp = dict(zip(idx, ids))
+        self._kf_db = [{"id": kf_id, "kps": kps, "desc": desc, "mp": mp}]
+        self.T_w_c = np.eye(4)
+        self._T_prev = np.eye(4)
+        self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
+                    "T": np.eye(4)}
+        self._kf_inliers = len(ids)
+        self._frames_since_kf = 0
+        self._coast_count = 0
+        self._initialized = True
+        self._metric = True              # la escala ya no es gauge: es medición
+        info.update(tracked=True, n_inliers=len(ids), state="INIT-OK")
+        return True
+
     def _initialize_step(self, gray, kps, desc, info) -> None:
         cv2 = self._cv2
         info["state"] = "INIT"
+        # RGB-D (v0.6): con profundidad no hay danza de dos vistas.
+        if self._depth is not None and self._initialize_rgbd(kps, desc, info):
+            return
         if self._ref is None:
             # El primer frame define el origen del mundo y la referencia.
             self._ref = (kps, desc)
@@ -642,17 +720,88 @@ class PnPTracker(TrackerBase):
                                  for m, ok in zip(matches, inlier_mask) if ok}
             self._insert_keyframe(gray, kps, desc, matched_frame_idx, info)
 
-    def _insert_keyframe(self, gray, kps, desc, matched_frame_idx, info) -> None:
-        """Promueve el frame a keyframe y triangula puntos NUEVOS contra el
-        keyframe anterior (matches que no corresponden a puntos ya mapeados)."""
-        kf = self._kf
-        matches = self.matcher.match(kf["desc"], desc, kf["kps"], kps, gray.shape)
-        fresh = [m for m in matches
-                 if m.queryIdx not in kf["mp"] and m.trainIdx not in matched_frame_idx]
+    def _with_virtual_right(self, px: np.ndarray) -> np.ndarray:
+        """Píxeles (N, 2) → (N, 3) añadiendo la coordenada derecha virtual
+        u_R = u − bf/z desde el mapa de profundidad del frame ACTUAL (teoría en
+        bundle_adjustment.py, § estéreo virtual). u_R = NaN donde el píxel no
+        tiene z válida → el BA cae al residuo 2D para esa observación. Solo se
+        llama con el frame en mano (init/inserción de KF): el puente del bucle
+        NO la usa — en modo asíncrono `self._depth` puede ser ya de un frame
+        más nuevo que el KF del bucle y fabricaría mediciones falsas."""
+        px = np.asarray(px, np.float64).reshape(-1, 2)
+        u_r = np.full(len(px), np.nan)
+        depth = self._depth
+        h, w = depth.shape
+        for n, (u, v) in enumerate(px):
+            ui, vi = int(round(u)), int(round(v))
+            if 0 <= ui < w and 0 <= vi < h:
+                z = float(depth[vi, ui])
+                if self.DEPTH_MIN < z < self.DEPTH_MAX:
+                    u_r[n] = u - self.STEREO_BF / z
+        return np.column_stack([px, u_r])
 
+    def _insert_keyframe(self, gray, kps, desc, matched_frame_idx, info) -> None:
+        """Promueve el frame a keyframe y crea puntos NUEVOS: por
+        retro-proyección de la profundidad (RGB-D, v0.6) o triangulando contra
+        el keyframe anterior (monocular)."""
         kf_id = self._frame_idx
         # Asociaciones del nuevo keyframe: kp del frame → id global del punto.
         mp = dict(matched_frame_idx)
+
+        if self._depth is not None and self._metric:
+            # PUNTOS DESDE PROFUNDIDAD (v0.6): cada keypoint NO asociado al mapa
+            # (SOLO en mapa MÉTRICO: estos puntos nacen en METROS — inyectarlos
+            # en un mapa a escala gauge (init monocular) crea un mapa de DOS
+            # escalas en tensión permanente; lo medimos en fr1_desk cuando la
+            # profundidad arrancaba tarde y la init caía a monocular)
+            # y con z válida se retro-proyecta al mundo — métrico, sin baseline
+            # (por eso RGB-D no sufre el fallo de fr1 handheld: crear mapa no
+            # requiere paralaje). Nacen con la observación de ESTE keyframe
+            # (abajo, con todo mp); la 2ª llega al re-observarlos (lección 7 /
+            # buffer de iSAM2). El filtro anti-duplicados aplica igual.
+            depth = self._depth
+            h, w = depth.shape
+            cand = []
+            for i, kp in enumerate(kps):
+                if i in matched_frame_idx:
+                    continue
+                u, v = int(round(kp.pt[0])), int(round(kp.pt[1]))
+                if 0 <= u < w and 0 <= v < h:
+                    z = float(depth[v, u])
+                    if self.DEPTH_MIN < z < self.DEPTH_MAX:
+                        cand.append((i, kp.pt[0], kp.pt[1], z))
+            if len(cand) > self.DEPTH_MAX_NEW_POINTS:
+                stride = int(np.ceil(len(cand) / self.DEPTH_MAX_NEW_POINTS))
+                cand = cand[::stride]    # submuestreo uniforme (tope de mapa)
+            if cand:
+                idx = np.array([c[0] for c in cand])
+                px = np.float64([(c[1], c[2]) for c in cand])
+                zs = np.float64([c[3] for c in cand])
+                pts_c = self.camera.backproject(px, zs)
+                pts_w = (self.T_w_c[:3, :3] @ pts_c.T).T + self.T_w_c[:3, 3]
+                valid = np.ones(len(pts_w), dtype=bool)
+                with self._map_lock:
+                    _, map_pts, _ = self.mapper.snapshot(self._local_kfs())
+                if len(map_pts):
+                    cam = self.T_w_c[:3, 3]
+                    for n in range(len(pts_w)):
+                        d_min = np.min(np.linalg.norm(map_pts - pts_w[n], axis=1))
+                        if d_min < 0.015 * np.linalg.norm(pts_w[n] - cam):
+                            valid[n] = False
+                if valid.any():
+                    with self._map_lock:
+                        ids = self.mapper.add_points(pts_w[valid],
+                                                     desc[idx[valid]],
+                                                     anchor_kf_id=kf_id)
+                    mp.update(dict(zip(idx[valid].tolist(), ids)))
+            fresh = []                   # sin triangulación 2-vistas en RGB-D
+        else:
+            kf = self._kf
+            matches = self.matcher.match(kf["desc"], desc, kf["kps"], kps,
+                                         gray.shape)
+            fresh = [m for m in matches
+                     if m.queryIdx not in kf["mp"]
+                     and m.trainIdx not in matched_frame_idx]
 
         if len(fresh) >= 10:
             pts0 = np.float64([kf["kps"][m.queryIdx].pt for m in fresh])
@@ -701,9 +850,13 @@ class PnPTracker(TrackerBase):
                                                  is_keyframe=True))
             if mp:
                 kp_idx = list(mp.keys())
-                self.mapper.add_observations(
-                    kf_id, list(mp.values()),
-                    np.float64([kps[i].pt for i in kp_idx]))
+                obs_px = np.float64([kps[i].pt for i in kp_idx])
+                if self._depth is not None and self._metric:
+                    # RGB-D: cada observación lleva su u_R — TAMBIÉN las de
+                    # puntos viejos re-observados: esa es la medición métrica
+                    # fresca que ancla la estructura en el BA (v0.6 hito 2).
+                    obs_px = self._with_virtual_right(obs_px)
+                self.mapper.add_observations(kf_id, list(mp.values()), obs_px)
         self._kf_ids.append(kf_id)
         self._local_ref_kf = None        # un KF nuevo re-centra el mapa local por recencia
         self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
@@ -835,7 +988,8 @@ class PnPTracker(TrackerBase):
             # El solve (lo pesado) corre FUERA del lock: el tracking sigue.
             opt_poses, opt_points = self._ba(
                 self.camera, kf_poses, points, obs, fixed_kfs=set(window[:2]),
-                iterations=self.BA_ITERATIONS)
+                iterations=self.BA_ITERATIONS,
+                stereo_bf=self.STEREO_BF if self._metric else 0.0)
 
         with self._map_lock:
             for k, T in opt_poses.items():
@@ -913,7 +1067,8 @@ class PnPTracker(TrackerBase):
             {pid for pid, c in counts.items() if c >= 2})
         opt_poses, opt_points = self._ba(
             self.camera, kf_poses, points, obs, fixed_kfs=set(kfs[:2]),
-            iterations=iterations or self.GBA_ITERATIONS)
+            iterations=iterations or self.GBA_ITERATIONS,
+            stereo_bf=self.STEREO_BF if self._metric else 0.0)
         for k, T in opt_poses.items():
             self.mapper.set_keyframe_pose(k, T)
         self.mapper.set_point_positions(opt_points)
@@ -1001,7 +1156,18 @@ class PnPTracker(TrackerBase):
                   for kp, pid_old in loop_by_kp.items()
                   if kp in cur_mp and cur_mp[kp] != pid_old]
 
-        if len(shared) >= 10:
+        # ─── La matemática: el grupo del bucle depende de QUIÉN fija la escala ───
+        # Monocular: la escala es GAUGE (no observable) y deriva — el bucle debe
+        # medirla (Umeyama sobre nubes duplicadas) y el grafo redistribuirla:
+        # Sim(3), Strasdat et al. RGB-D: la escala es una MEDICIÓN del sensor;
+        # el mapa nace métrico y NO deriva en escala (medido en fr2_xyz: 3669
+        # frames sin bucles, escala por ventanas 0.90-1.09, ATE 1.1 cm). Un
+        # bucle Sim(3) aquí es veneno que ADEMÁS compone: el s_rel ruidoso del
+        # Umeyama re-escala el mapa viejo, los puntos nuevos siguen naciendo
+        # métricos, y el siguiente bucle mide esa discrepancia y re-escala otra
+        # vez (medido: 22 bucles → escala 2.09, ATE 22 cm). Por eso ORB-SLAM2
+        # cierra bucles RGB-D/estéreo en SE(3) y reserva Sim(3) para monocular.
+        if not self._metric and len(shared) >= 10:
             from vslam.evaluation import umeyama_alignment
             with self._map_lock:
                 pos_new = self.mapper.point_positions(pid for pid, _ in shared)
@@ -1010,7 +1176,7 @@ class PnPTracker(TrackerBase):
             X_old = np.array([pos_old[pid] for _, pid in shared])
             s_rel, _, _ = umeyama_alignment(X_new, X_old)   # escala nuevo→viejo
         else:
-            s_rel = 1.0     # sin nube compartida: asumir bucle rígido
+            s_rel = 1.0     # métrico o sin nube compartida: bucle rígido
 
         # Grafo Sim(3) sobre TODOS los keyframes (v0.4): la corrección — con
         # su componente de escala — se redistribuye por la cadena en lugar de
@@ -1022,7 +1188,8 @@ class PnPTracker(TrackerBase):
         with self._map_lock:
             kf_ids_snap = list(self._kf_ids)
             poses = {k: self.mapper.keyframe_pose(k) for k in kf_ids_snap}
-        graph = GaussNewtonPoseGraph("sim3")
+        dim = 6 if self._metric else 7
+        graph = GaussNewtonPoseGraph("se3" if self._metric else "sim3")
         # TODO el segmento antiguo queda FIJO (≤ keyframe del bucle): el
         # cierre corrige al recién llegado, no reescribe el mundo — mover la
         # referencia dejaría la historia ya emitida en otro marco (medido:
@@ -1031,13 +1198,13 @@ class PnPTracker(TrackerBase):
             graph.add_pose(k, poses[k], fixed=(k <= old["id"]))
         for a, b in zip(kf_ids_snap[:-1], kf_ids_snap[1:]):
             graph.add_odometry_factor(a, b, invert_se3(poses[a]) @ poses[b],
-                                      np.eye(7) * 1e2)
+                                      np.eye(dim) * 1e2)
         S_cur_meas = np.eye(4)
         S_cur_meas[:3, :3] = s_rel * T_loop[:3, :3]
         S_cur_meas[:3, 3] = T_loop[:3, 3]
         graph.add_loop_factor(old["id"], cur_id,
                               invert_se3(poses[old["id"]]) @ S_cur_meas,
-                              np.eye(7) * 1e4)
+                              np.eye(dim) * 1e4)
 
         optimized = graph.optimize(iterations=20)     # lo pesado, fuera del lock
         with self._map_lock:

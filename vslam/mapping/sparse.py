@@ -40,7 +40,10 @@ class SparsePointMapper(MapperBase):
         self._anchor_kf: List[int] = []           # keyframe que creó cada punto
         self._active: List[bool] = []             # culling (v0.4b): NO se borra
         self._kf_poses: Dict[int, np.ndarray] = {}
-        # Observaciones por keyframe: [(point_id, píxel (2,)), ...]
+        # Observaciones por keyframe: [(point_id, píxel), ...]. El píxel es
+        # (2,) [u, v] o, en RGB-D (v0.6), (3,) [u, v, u_R] con la coordenada
+        # derecha virtual (NaN si el píxel no tenía profundidad válida) — el
+        # almacén no interpreta: guarda lo que el tracker midió, el BA decide.
         self._obs: Dict[int, List[Tuple[int, np.ndarray]]] = {}
 
     # ── escritura (la llama el tracker) ──────────────────────────────────────

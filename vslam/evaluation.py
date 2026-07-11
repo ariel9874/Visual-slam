@@ -43,9 +43,16 @@ def load_tum_positions(path: str | Path) -> np.ndarray:
     return data[:, 1:4]
 
 
-def umeyama_alignment(source: np.ndarray, target: np.ndarray
+def umeyama_alignment(source: np.ndarray, target: np.ndarray,
+                      with_scale: bool = True
                       ) -> Tuple[float, np.ndarray, np.ndarray]:
-    """Similitud (s, R, t) que mejor mapea `source` sobre `target` (fórmulas arriba)."""
+    """Similitud (s, R, t) que mejor mapea `source` sobre `target` (fórmulas arriba).
+
+    `with_scale=False` (v0.6): alineación RÍGIDA (s fijado a 1) — la métrica
+    de un sistema MÉTRICO (RGB-D/estéreo): si el mapa está en metros de
+    verdad, no hay escala que regalar al alineador. R y t salen de la misma
+    SVD (el óptimo rotacional no depende de s); solo cambia t = μ_g − R·μ_p.
+    """
     src, dst = np.asarray(source, float), np.asarray(target, float)
     mu_s, mu_d = src.mean(0), dst.mean(0)
     src_c, dst_c = src - mu_s, dst - mu_d
@@ -54,25 +61,30 @@ def umeyama_alignment(source: np.ndarray, target: np.ndarray
     U, D, Vt = np.linalg.svd(C)
     S = np.diag([1.0, 1.0, np.sign(np.linalg.det(Vt.T @ U.T))])
     R = Vt.T @ S @ U.T
-    var_src = (src_c ** 2).sum() / len(src)
-    s = float(np.trace(np.diag(D) @ S) / var_src)
+    if with_scale:
+        var_src = (src_c ** 2).sum() / len(src)
+        s = float(np.trace(np.diag(D) @ S) / var_src)
+    else:
+        s = 1.0
     t = mu_d - s * R @ mu_s
     return s, R, t
 
 
-def ate(estimated: np.ndarray, groundtruth: np.ndarray) -> Dict[str, float]:
-    """ATE tras alineación de similitud. Devuelve métricas en las unidades del GT.
+def ate(estimated: np.ndarray, groundtruth: np.ndarray,
+        with_scale: bool = True) -> Dict[str, float]:
+    """ATE tras alineación de similitud (o RÍGIDA con with_scale=False — la
+    métrica honesta de un sistema métrico, v0.6). Unidades del GT.
 
     Returns:
-        dict con: rmse, mean, max (metros del GT), scale (escala recuperada),
-        y rmse_pct (rmse como % de la longitud del recorrido GT — útil para
-        comparar entre secuencias de distinta longitud).
+        dict con: rmse, mean, max (metros del GT), scale (escala recuperada;
+        1.0 exacto si with_scale=False), y rmse_pct (rmse como % de la longitud
+        del recorrido GT — para comparar secuencias de distinta longitud).
     """
     est, gt = np.asarray(estimated, float), np.asarray(groundtruth, float)
     if len(est) != len(gt):
         raise ValueError(f"Longitudes distintas: est={len(est)} gt={len(gt)} "
                          "(¿se compararon corridas con --max-frames?)")
-    s, R, t = umeyama_alignment(est, gt)
+    s, R, t = umeyama_alignment(est, gt, with_scale=with_scale)
     aligned = (s * (R @ est.T)).T + t
     err = np.linalg.norm(aligned - gt, axis=1)
     path_len = float(np.linalg.norm(np.diff(gt, axis=0), axis=1).sum())

@@ -59,6 +59,9 @@ def main() -> int:
     parser.add_argument("--fast", action="store_true",
                         help="stack de TIEMPO REAL de v0.5: isam2 + hilo de mapeo "
                              "(+ C++ guiado y BoW, que ya son auto). ~46 fps en fr2_desk")
+    parser.add_argument("--depth", action="store_true",
+                        help="modo RGB-D (v0.6): init instantánea + puntos desde "
+                             "profundidad; el ATE se reporta MÉTRICO (sin escala)")
     parser.add_argument("--no-ba", action="store_true")
     parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--max-frames", type=int, default=0)
@@ -66,10 +69,18 @@ def main() -> int:
 
     root = Path(args.root)
     camera = tum_camera(root.name)
-    loader = TUMRGBDLoader(root)
+    loader = TUMRGBDLoader(root, with_depth=args.depth)
     K, dist = camera.K, camera.dist
     print(f"Secuencia: {root.name} | {len(loader)} frames | "
-          f"frontend: {args.detector}+ratio | cam fx={camera.fx:.1f}")
+          f"frontend: {args.detector}+ratio | cam fx={camera.fx:.1f}"
+          + (" | RGB-D" if args.depth else ""))
+    # Rectificación (v0.6): el mismo mapa de undistort para gris y profundidad,
+    # pero la profundidad va con NEAREST — interpolar bilinealmente profundidades
+    # a través de una discontinuidad inventa valores que no existen en la escena.
+    maps = None
+    if camera.has_distortion:
+        maps = cv2.initUndistortRectifyMap(
+            K, dist, None, K, (camera.width, camera.height), cv2.CV_32FC1)
 
     ba_backend = "isam2" if args.fast else args.ba
     tracker = PnPTracker(camera, extractor=create_extractor(args.detector),
@@ -85,13 +96,30 @@ def main() -> int:
     tracker.KF_HEALTH_INLIERS = args.health
 
     est_ts, est_pos, states = [], [], []
-    lost = 0
-    for i, (ts, gray) in enumerate(loader):
+    lost = skipped = 0
+    for i, item in enumerate(loader):
         if args.max_frames and i >= args.max_frames:
             break
+        ts, gray = item[0], item[1]
+        depth = item[2] if args.depth else None
+        # RGB-D: la init ESPERA al primer frame con profundidad. Sin esto, si
+        # el stream de profundidad arranca tarde (fr1_desk: 6 frames sin
+        # pareja depth en la asociación), el tracker cae a la init MONOCULAR
+        # y nace un mapa MIXTO — escala gauge del init + metros de los puntos
+        # de profundidad — con _metric=False: ni bucle SE(3) ni residuo de
+        # profundidad en el BA. Medido en fr1_desk: escala 1.008 de pura
+        # casualidad (la mediana del escritorio es ~1 m ≈ el gauge mediana=1).
+        if args.depth and depth is None and not tracker._initialized:
+            skipped += 1
+            continue
         # Pre-rectificación: la geometría del repo asume el modelo ideal.
-        rect = cv2.undistort(gray, K, dist) if camera.has_distortion else gray
-        T, info = tracker.process_frame(rect)
+        if maps is not None:
+            rect = cv2.remap(gray, maps[0], maps[1], cv2.INTER_LINEAR)
+            if depth is not None:
+                depth = cv2.remap(depth, maps[0], maps[1], cv2.INTER_NEAREST)
+        else:
+            rect = gray
+        T, info = tracker.process_frame(rect, depth)
         est_ts.append(ts)
         est_pos.append(T[:3, 3].copy())
         states.append(info["state"])
@@ -105,7 +133,8 @@ def main() -> int:
     est_ts = np.array(est_ts)
     est_pos = np.array(est_pos)
     n_init = sum(1 for s in states if s == "INIT")
-    print(f"    frames en INIT: {n_init} | perdidos (coast/gate): {lost} | "
+    print(f"    frames en INIT: {n_init} (saltados sin depth: {skipped}) | "
+          f"perdidos (coast/gate): {lost} | "
           f"bucles: {len(tracker.loop_events)} | relocs: {len(tracker.reloc_events)}")
 
     # Evaluación: asociar el GT de la mocap a los frames trackeados.
@@ -119,10 +148,17 @@ def main() -> int:
     gt_m = gt_pos[assoc[ok]]
     print(f"    frames evaluados (con GT): {ok.sum()} / {len(est_ts) - start}")
 
+    # En RGB-D el ATE es MÉTRICO: alineación rígida (sin regalar la escala al
+    # alineador). La escala de similitud se reporta aparte: ≈1.000 es la prueba
+    # de que el mapa está de verdad en metros.
+    with_scale = not args.depth
+    label = "METRICO" if args.depth else "similitud"
     if len(est_m) >= 3:
-        m = ate(est_m, gt_m)
-        print(f"\nATE ONLINE   : {100*m['rmse']:.1f} cm rmse | {100*m['mean']:.1f} mean | "
-              f"{100*m['max']:.1f} max | escala {m['scale']:.3f}")
+        m = ate(est_m, gt_m, with_scale=with_scale)
+        s_check = ate(est_m, gt_m)["scale"]
+        print(f"\nATE ONLINE   ({label}): {100*m['rmse']:.1f} cm rmse | "
+              f"{100*m['mean']:.1f} mean | {100*m['max']:.1f} max "
+              f"| escala similitud {s_check:.3f}")
     else:
         print("\n[fallo] muy pocos frames con GT asociado para evaluar ATE")
         return 1
@@ -138,9 +174,11 @@ def main() -> int:
     a2 = associate_by_timestamp(kf_ts, gt_ts, max_dt=0.05)
     ok2 = a2 >= 0
     if ok2.sum() >= 3:
-        mk = ate(kf_pos[ok2], gt_pos[a2[ok2]])
-        print(f"ATE FINAL-KF : {100*mk['rmse']:.1f} cm rmse | {100*mk['mean']:.1f} mean | "
-              f"{100*mk['max']:.1f} max | escala {mk['scale']:.3f} | {ok2.sum()} KFs")
+        mk = ate(kf_pos[ok2], gt_pos[a2[ok2]], with_scale=with_scale)
+        sk = ate(kf_pos[ok2], gt_pos[a2[ok2]])["scale"]
+        print(f"ATE FINAL-KF ({label}): {100*mk['rmse']:.1f} cm rmse | "
+              f"{100*mk['mean']:.1f} mean | {100*mk['max']:.1f} max "
+              f"| escala similitud {sk:.3f} | {ok2.sum()} KFs")
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
