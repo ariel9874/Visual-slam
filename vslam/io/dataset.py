@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from vslam.core.camera import PinholeCamera
+from vslam.core.geometry import invert_se3
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif"}
 
@@ -288,8 +289,120 @@ def read_euroc_groundtruth(root: str | Path, cam: str = "cam0"
     ts = data[:, 0] * 1e-9
     p_body = data[:, 1:4]
     q = data[:, 4:8]                                  # [w, x, y, z]
-    text = (Path(root) / "mav0" / cam / "sensor.yaml").read_text(encoding="utf-8")
-    t_bs = np.array(_yaml_list(text, "data")).reshape(4, 4)[:3, 3]
+    t_bs = _euroc_T_BS(root, cam)[:3, 3]
     pos = np.array([_quat_wxyz_to_R(q[i]) @ t_bs + p_body[i]
                     for i in range(len(ts))])
     return ts, pos
+
+
+def _euroc_T_BS(root: str | Path, cam: str) -> np.ndarray:
+    """Extrínseco T_BS (body←sensor, 4×4) de `mav0/<cam>/sensor.yaml`."""
+    text = (Path(root) / "mav0" / cam / "sensor.yaml").read_text(encoding="utf-8")
+    return np.array(_yaml_list(text, "data")).reshape(4, 4)
+
+
+class EuRoCStereoRig:
+    """Rectificación estéreo de un par EuRoC (cam0 izquierda, cam1 derecha).
+
+    ─── La matemática: por qué RECTIFICAR ─────────────────────────────────────
+    Dos cámaras cualesquiera ven un punto sobre su recta epipolar; buscar la
+    correspondencia es una búsqueda 2D. La RECTIFICACIÓN reproyecta ambas
+    imágenes a un par virtual con los ejes ópticos paralelos y los planos de
+    imagen coplanares → las rectas epipolares se vuelven FILAS horizontales y la
+    correspondencia colapsa a una búsqueda 1D: el mismo punto aparece en
+    (u_L, v) y (u_R, v) con la MISMA v. La diferencia d = u_L − u_R es la
+    DISPARIDAD, y la geometría del par da la profundidad:
+
+        z = fx · b / d          (b = baseline; fx · b ≡ bf)
+
+    `cv2.stereoRectify` calcula las homografías R1, R2 y las nuevas matrices de
+    proyección P1, P2 desde los intrínsecos + la pose relativa cam0←cam1. Tras
+    rectificar, la cámara izquierda es un pinhole SIN distorsión (P1) y
+    bf = −P2[0,3] (P2 codifica el baseline como −fx·b en su columna de traslación).
+
+    ─── La conexión con el hito 2 (RGB-D) ─────────────────────────────────────
+    En RGB-D la cámara derecha era VIRTUAL: sintetizábamos u_R = u − bf/z desde
+    la profundidad del sensor. Aquí la cámara derecha es REAL y u_R se MIDE
+    (u_R = u_L − d, el match en la imagen derecha). El residuo del BA es
+    idéntico ([u, v, u_R], teoría en bundle_adjustment.py) — solo cambia la
+    PROCEDENCIA de z: sensor de profundidad vs. triangulación estéreo.
+    """
+
+    def __init__(self, root: str | Path, left: str = "cam0",
+                 right: str = "cam1") -> None:
+        camL, camR = euroc_camera(root, left), euroc_camera(root, right)
+        # Pose relativa: X_right = T_R_L · X_left, con T_R_L = T_B_R⁻¹ · T_B_L
+        # (ambos sensor.yaml dan body←sensor). stereoRectify quiere justo la
+        # transformación de la 1ª cámara (izq) a la 2ª (der).
+        T_R_L = invert_se3(_euroc_T_BS(root, right)) @ _euroc_T_BS(root, left)
+        size = (camL.width, camL.height)
+        R1, R2, P1, P2, self.Q, _, _ = cv2.stereoRectify(
+            camL.K, camL.dist, camR.K, camR.dist, size,
+            T_R_L[:3, :3], T_R_L[:3, 3],
+            flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
+        # Cámara izquierda RECTIFICADA (sin distorsión: la rectificación la quita).
+        self.camera = PinholeCamera(fx=P1[0, 0], fy=P1[1, 1],
+                                    cx=P1[0, 2], cy=P1[1, 2],
+                                    width=size[0], height=size[1])
+        self.baseline = float(-P2[0, 3] / P2[0, 0])   # metros
+        self.bf = float(-P2[0, 3])                    # fx · baseline (px·m)
+        self.map_left = cv2.initUndistortRectifyMap(
+            camL.K, camL.dist, R1, P1, size, cv2.CV_32FC1)
+        self.map_right = cv2.initUndistortRectifyMap(
+            camR.K, camR.dist, R2, P2, size, cv2.CV_32FC1)
+
+    def rectify(self, gray_left: np.ndarray, gray_right: np.ndarray
+                ) -> Tuple[np.ndarray, np.ndarray]:
+        """(izq, der) rectificadas: filas = rectas epipolares (búsqueda 1D)."""
+        return (cv2.remap(gray_left, *self.map_left, cv2.INTER_LINEAR),
+                cv2.remap(gray_right, *self.map_right, cv2.INTER_LINEAR))
+
+
+class EuRoCStereoLoader:
+    """Itera (ts, izquierda_rectificada, profundidad) — MISMA interfaz que
+    `TUMRGBDLoader(with_depth=True)`, para que el tracker RGB-D métrico (v0.6)
+    funcione sin cambios. La profundidad NO viene de un sensor: se triangula por
+    DISPARIDAD estéreo densa (`cv2.StereoSGBM`) sobre el par rectificado.
+
+    depth = bf / disparidad; = 0 donde la disparidad es inválida o cae fuera de
+    [min_depth, max_depth] (mismo convenio '0 = sin dato' que RGB-D). El ruido
+    de la profundidad crece con z² (∂z/∂d = −bf/d²): por eso el residuo del BA
+    pesa u_R = u − bf/z, cuyo peso decae exactamente con z² — la geometría
+    compensa el ruido (ver bundle_adjustment.py).
+    """
+
+    def __init__(self, root: str | Path, rig: Optional[EuRoCStereoRig] = None,
+                 num_disparities: int = 96, block_size: int = 7,
+                 min_depth: float = 0.5, max_depth: float = 40.0) -> None:
+        self.rig = rig or EuRoCStereoRig(root)
+        self._left = EuRoCLoader(root, "cam0")
+        self._right = EuRoCLoader(root, "cam1")
+        self.min_depth, self.max_depth = min_depth, max_depth
+        # SGBM: robusto y estándar. P1/P2 = suavidad (penalización a saltos de
+        # disparidad), escalados con el tamaño de bloque (recomendación de OpenCV).
+        self._sgbm = cv2.StereoSGBM_create(
+            minDisparity=0, numDisparities=num_disparities, blockSize=block_size,
+            P1=8 * block_size ** 2, P2=32 * block_size ** 2,
+            uniquenessRatio=10, speckleWindowSize=100, speckleRange=2,
+            disp12MaxDiff=1, mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY)
+
+    @property
+    def camera(self) -> PinholeCamera:
+        return self.rig.camera            # la izquierda RECTIFICADA
+
+    @property
+    def stereo_bf(self) -> float:
+        return self.rig.bf
+
+    def __len__(self) -> int:
+        return min(len(self._left), len(self._right))
+
+    def __iter__(self) -> Iterator[Tuple[float, np.ndarray, np.ndarray]]:
+        for (ts, gl), (_, gr) in zip(self._left, self._right):
+            L, R = self.rig.rectify(gl, gr)
+            disp = self._sgbm.compute(L, R).astype(np.float32) / 16.0
+            depth = np.zeros_like(disp)
+            valid = disp > 0.0
+            depth[valid] = self.rig.bf / disp[valid]
+            depth[(depth < self.min_depth) | (depth > self.max_depth)] = 0.0
+            yield ts, L, depth
