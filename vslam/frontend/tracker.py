@@ -968,7 +968,9 @@ class PnPTracker(TrackerBase):
                     if start < len(entries):
                         new_obs.extend((kf, pid, uv) for pid, uv in entries[start:])
                         self._isam2_cursor[kf] = len(entries)
-                result = self._isam2.process_keyframe(self.mapper, window, new_obs)
+                result = self._isam2.process_keyframe(
+                    self.mapper, window, new_obs,
+                    stereo_bf=self.STEREO_BF if self._metric else 0.0)
             if result is None:
                 return          # update fallido: seguir con la pose del PnP
             opt_poses, opt_points = result

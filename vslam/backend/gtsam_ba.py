@@ -52,10 +52,11 @@ def gtsam_bundle_adjustment(
     Devuelve ({kf_id: T_w_c}, {point_id: posición}); las variables sin
     observaciones (o puntos con < 2 obs) salen sin tocar, como en la referencia.
 
-    `stereo_bf` se ACEPTA pero aún no se usa (deuda v0.6): el residuo de
-    profundidad RGB-D vive en la referencia NumPy; portarlo aquí es
-    `GenericStereoFactor3D` + `Cal3_S2Stereo` (el píxel (3,) ya trae u_R).
-    Mientras tanto se proyecta con [u, v] — paridad monocular intacta.
+    `stereo_bf > 0` (RGB-D/estéreo, v0.6): las observaciones (3,) con u_R finita
+    entran como `GenericStereoFactor3D` sobre `Cal3_S2Stereo(baseline = bf/fx)`
+    — el mismo residuo [u, v, u_R] que la referencia NumPy, ahora resuelto por
+    el motor de C++. La medición es `StereoPoint2(u_L, u_R, v)`. Las (2,) o con
+    u_R = NaN caen al factor monocular — igual criterio que la referencia.
     """
     try:
         import gtsam
@@ -81,6 +82,14 @@ def gtsam_bundle_adjustment(
     px_noise = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
     robust = gtsam.noiseModel.Robust.Create(
         gtsam.noiseModel.mEstimator.Huber.Create(huber_px), px_noise)
+    # Ruta estéreo (v0.6): calibración con baseline b = bf/fx y ruido 3D.
+    stereo = stereo_bf > 0.0
+    if stereo:
+        K_s = gtsam.Cal3_S2Stereo(camera.fx, camera.fy, 0.0,
+                                  camera.cx, camera.cy, stereo_bf / camera.fx)
+        robust_s = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Huber.Create(huber_px),
+            gtsam.noiseModel.Isotropic.Sigma(3, 1.0))
 
     graph = gtsam.NonlinearFactorGraph()
     initial = gtsam.Values()
@@ -90,8 +99,14 @@ def gtsam_bundle_adjustment(
         x = pts[p]
         initial.insert(L(p), gtsam.Point3(float(x[0]), float(x[1]), float(x[2])))
     for k, p, uv in obs:
-        # uv[:2]: las observaciones RGB-D (v0.6) traen [u, v, u_R] — ver docstring.
-        graph.add(gtsam.GenericProjectionFactorCal3_S2(uv[:2], robust, X(k), L(p), K))
+        if stereo and len(uv) == 3 and np.isfinite(uv[2]):
+            # StereoPoint2(u_L, u_R, v): la fila de profundidad ancla la escala.
+            graph.add(gtsam.GenericStereoFactor3D(
+                gtsam.StereoPoint2(float(uv[0]), float(uv[2]), float(uv[1])),
+                robust_s, X(k), L(p), K_s))
+        else:
+            graph.add(gtsam.GenericProjectionFactorCal3_S2(
+                uv[:2], robust, X(k), L(p), K))
     # Anclar el gauge: prior fuerte sobre los KFs fijos (≈ fijarlos).
     prior_noise = gtsam.noiseModel.Isotropic.Sigma(6, 1e-6)
     for k in fixed_kfs & used_kfs:

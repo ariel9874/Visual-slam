@@ -68,6 +68,15 @@ class ISAM2LocalBA:
         px = gtsam.noiseModel.Isotropic.Sigma(2, 1.0)
         self._robust = gtsam.noiseModel.Robust.Create(
             gtsam.noiseModel.mEstimator.Huber.Create(huber_px), px)
+        self._huber_px = huber_px
+        # Ruta estéreo (v0.6): calibración con baseline construida perezosamente
+        # cuando llega el primer bf (el tracker lo pasa por keyframe; es constante
+        # por secuencia). Ruido 3D con la misma Huber.
+        self._stereo_bf = 0.0
+        self._K_stereo = None
+        self._robust_stereo = gtsam.noiseModel.Robust.Create(
+            gtsam.noiseModel.mEstimator.Huber.Create(huber_px),
+            gtsam.noiseModel.Isotropic.Sigma(3, 1.0))
         self._pose_prior = gtsam.noiseModel.Isotropic.Sigma(6, self.POSE_PRIOR_SIGMA)
         self._point_prior = gtsam.noiseModel.Isotropic.Sigma(3, self.POINT_PRIOR_SIGMA)
         self.n_failures = 0          # updates fallidos capturados (diagnóstico)
@@ -98,8 +107,18 @@ class ISAM2LocalBA:
 
     # ── inserción incremental ─────────────────────────────────────────────────
 
+    def _stereo_cal(self, bf: float):
+        """Cal3_S2Stereo(baseline = bf/fx), cacheada por bf (constante/secuencia)."""
+        if self._K_stereo is None or self._stereo_bf != bf:
+            self._K_stereo = self._gtsam.Cal3_S2Stereo(
+                self.camera.fx, self.camera.fy, 0.0,
+                self.camera.cx, self.camera.cy, bf / self.camera.fx)
+            self._stereo_bf = bf
+        return self._K_stereo
+
     def process_keyframe(self, mapper, window: List[int],
                          new_obs: List[Tuple[int, int, np.ndarray]],
+                         stereo_bf: float = 0.0,
                          ) -> Optional[Tuple[Dict[int, np.ndarray],
                                              Dict[int, np.ndarray]]]:
         """Alimenta las observaciones nuevas, corre un update incremental y
@@ -108,8 +127,11 @@ class ISAM2LocalBA:
 
         `new_obs`: [(kf_id, point_id, píxel)] aún no alimentadas (el tracker
         lleva los cursores). Los puntos nuevos deben venir con sus ≥2 obs.
+        `stereo_bf > 0` (RGB-D/estéreo): las obs (3,) con u_R finita entran como
+        factor estéreo (ancla la escala métrica en el BA incremental, v0.6).
         """
         gtsam, sym = self._gtsam, self._sym
+        K_s = self._stereo_cal(stereo_bf) if stereo_bf > 0.0 else None
         X = lambda i: sym("x", i)                    # noqa: E731
         L = lambda j: sym("l", j)                    # noqa: E731
         graph = gtsam.NonlinearFactorGraph()
@@ -166,10 +188,15 @@ class ISAM2LocalBA:
                 self._pose_priors_added += 1
 
         for kf, pid, uv in factors:
-            # [:2]: las observaciones RGB-D (v0.6) traen [u, v, u_R]; el factor
-            # estéreo de iSAM2 es deuda — se proyecta con [u, v] (paridad).
-            graph.add(gtsam.GenericProjectionFactorCal3_S2(
-                np.asarray(uv, float)[:2], self._robust, X(kf), L(pid), self._K))
+            uv = np.asarray(uv, float)
+            if K_s is not None and len(uv) == 3 and np.isfinite(uv[2]):
+                # StereoPoint2(u_L, u_R, v): ancla la escala en el BA incremental.
+                graph.add(gtsam.GenericStereoFactor3D(
+                    gtsam.StereoPoint2(float(uv[0]), float(uv[2]), float(uv[1])),
+                    self._robust_stereo, X(kf), L(pid), K_s))
+            else:
+                graph.add(gtsam.GenericProjectionFactorCal3_S2(
+                    uv[:2], self._robust, X(kf), L(pid), self._K))
 
         # 4) Update incremental (con red de seguridad: decisión 5).
         try:
