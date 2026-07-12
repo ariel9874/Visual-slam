@@ -1,9 +1,29 @@
-# Integración ROS 2 (planificada — v0.6)
+# Integración ROS 2 (v0.8 — IMPLEMENTADA; lección 43 en docs/05)
 
-El núcleo de `vslam/` y `cpp/` **no importa ROS**: estos paquetes serán una cáscara fina que
+El núcleo de `vslam/` y `cpp/` **no importa ROS**: estos paquetes son una cáscara fina que
 traduce los contratos de datos del repo a mensajes y TF (docs/02_arquitectura.md §6).
 
-## Paquetes previstos
+## Uso (contenedor docker/, ver docker/README.md)
+
+```bash
+# compilar el workspace (una vez, cache en volúmenes)
+docker compose -f docker/docker-compose.yml run --rm vslam-ros \
+    bash -c "cd /workspace/ros2 && colcon build --symlink-install"
+
+# demo TUM con RViz (WSLg en Windows 11; rviz:=false para headless)
+docker compose -f docker/docker-compose.yml run --rm vslam-ros \
+    bash -c "source /workspace/ros2/install/setup.bash; \
+             ros2 launch vslam_ros tum_demo.launch.py rate:=10.0 rviz:=true"
+
+# smoke de integración (verifica odom/keyframes/Path/PointCloud2/TF)
+#   (con el launch corriendo) python3 ros2/vslam_ros/test/smoke_pipeline.py 35
+```
+
+OJO al sourcear en una línea: `source setup.bash && ros2 launch ... &` pone en
+background LA LISTA ENTERA (el shell queda sin overlay y el CLI no resuelve los
+tipos custom). Usar `source setup.bash; ros2 launch ... &`.
+
+## Paquetes
 
 ### `vslam_msgs`
 | Mensaje | Contenido | Origen en el repo |
@@ -12,12 +32,19 @@ traduce los contratos de datos del repo a mensajes y TF (docs/02_arquitectura.md
 | `PoseGraphEdge.msg` | ids, transformación relativa, matriz de información | factores de `vslam/backend` |
 | `TrackingState.msg` | nº de inliers, estado (OK/COASTING/LOST) | diagnóstico del frontend |
 
-### `vslam_ros` — tres lifecycle nodes componibles
+### `vslam_ros` — cuatro nodos (lifecycle: pendiente de promoción)
 | Nodo | Suscribe | Publica | Frecuencia |
 |---|---|---|---|
-| `frontend_node` | `/camera/image_raw`, `/camera/camera_info` | `/vslam/odom` (`nav_msgs/Odometry`), `/vslam/keyframes` (`vslam_msgs/Keyframe`), TF `odom→base_link` | por frame (~30 Hz) |
-| `backend_node` | `/vslam/keyframes`, `/vslam/loop_candidates` | `/vslam/optimized_path` (`nav_msgs/Path`), TF `map→odom` | por keyframe |
-| `mapper_node` | `/vslam/keyframes` + poses optimizadas | `/vslam/map` (`sensor_msgs/PointCloud2` o render GS) | asíncrona |
+| `dataset_node` | — (lee TUM del disco) | `/camera/image_raw` (CRUDA), `/camera/depth/image_raw`, `/camera/camera_info` | param `rate` |
+| `frontend_node` | `/camera/image_raw`+depth (sincronizados), `/camera/camera_info` | `/vslam/odom` (`nav_msgs/Odometry`), `/vslam/tracking_state`, `/vslam/keyframes` (`vslam_msgs/Keyframe`), TF `odom→base_link` | por frame |
+| `backend_node` | `/vslam/keyframes`, `/vslam/odom` | `/vslam/optimized_path` (`nav_msgs/Path`), TF `map→odom` = `T_map_kf·T_odom_kf⁻¹` | por keyframe |
+| `mapper_node` | `/vslam/keyframes` | `/vslam/map` (`sensor_msgs/PointCloud2` xyzi, frame `map`) | param `map_period` |
+
+(El backend REAL —BA/iSAM2/bucles— corre dentro del tracker en `frontend_node`:
+separarlo por tópicos sería re-arquitectura, no cáscara. `backend_node` publica
+lo que al ROBOT le corresponde del backend: el Path optimizado y la corrección
+`map→odom` de REP-105. El mapper 3DGS foto-realista vive en los ejemplos 07/08
+con el contenedor gsplat — este contenedor no trae CUDA.)
 
 ## Decisiones de diseño
 

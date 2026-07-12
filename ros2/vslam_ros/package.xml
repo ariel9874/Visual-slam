@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>vslam_ros</name>
+  <version>0.8.0</version>
+  <description>
+    Cascara ROS 2 del Visual-SLAM educativo: nodos finos que traducen los
+    contratos del nucleo (vslam/) a topicos y TF. El nucleo NO importa ROS;
+    la conversion de ejes (optico OpenCV a REP-103) vive SOLO aqui, en la
+    frontera (ros2/README.md).
+  </description>
+  <maintainer email="ariel98745@gmail.com">Ariel Vazquez</maintainer>
+  <license>TBD</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>cv_bridge</depend>
+  <depend>message_filters</depend>
+  <depend>vslam_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

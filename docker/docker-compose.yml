@@ -27,8 +27,13 @@ services:
     environment:
       - ROS_DOMAIN_ID=42
       - ROS_LOCALHOST_ONLY=1
-      # Descomenta para reenviar GUI (rviz2) vía WSLg en Windows 11:
-      # - DISPLAY=${DISPLAY:-:0}
+      # GUI (rviz2) vía WSLg en Windows 11 con Docker Desktop: el X server de
+      # WSLg se comparte al contenedor por los mounts de abajo. Si no hay WSLg,
+      # rviz falla pero el resto del pipeline no se entera (rviz:=false).
+      - DISPLAY=:0
+      - WAYLAND_DISPLAY=wayland-0
+      - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
+      - LIBGL_ALWAYS_SOFTWARE=1   # render por CPU: estable en WSLg sin GPU passthrough
 
     volumes:
       # Repo completo en vivo (incluye data/ y output/, que están en .gitignore).
@@ -37,6 +42,9 @@ services:
       # cree el workspace ROS con los paquetes vslam_ros/vslam_msgs).
       - ros-build-cache:/workspace/ros2/build
       - ros-install-cache:/workspace/ros2/install
+      # X11/WSLg de Docker Desktop (ruta especial del host de Docker Desktop).
+      - /run/desktop/mnt/host/wslg/.X11-unix:/tmp/.X11-unix
+      - /run/desktop/mnt/host/wslg:/mnt/wslg
 
     working_dir: /workspace
 

@@ -1,0 +1,64 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Fixed Frame: map
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+    - Class: rviz_default_plugins/Path
+      Name: Trayectoria (KFs optimizados)
+      Enabled: true
+      Topic:
+        Value: /vslam/optimized_path
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Color: 25; 255; 0
+      Line Style: Billboards
+      Line Width: 0.04
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Mapa (nube de keyframes)
+      Enabled: true
+      Topic:
+        Value: /vslam/map
+        Depth: 1
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+      Style: Points
+      Size (Pixels): 4
+      Color Transformer: Intensity
+      Channel Name: intensity
+      Use rainbow: false
+      Min Intensity: 0.0
+      Max Intensity: 1.0
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometria
+      Enabled: true
+      Topic:
+        Value: /vslam/odom
+        Depth: 10
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
+      Keep: 100
+      Shape:
+        Value: Axes
+        Axes Length: 0.1
+        Axes Radius: 0.01
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 5
+      Pitch: 0.5
+      Yaw: 3.6
+      Focal Point:
+        X: 1.2
+        Y: 0.0
+        Z: 0.3
+Window Geometry:
+  Width: 1400
+  Height: 900
