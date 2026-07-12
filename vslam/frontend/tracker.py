@@ -253,6 +253,8 @@ class PnPTracker(TrackerBase):
         self.reloc_events: list = []     # [(frame, kf_reconocido)] (v0.4b)
         self.reset_events: list = []     # [frame] resets de mapa (v0.9)
         self._archived_traj: list = []   # KFs de sesiones muertas (reporting)
+        self._map_epoch = 0              # sesión de mapa: el reset la incrementa
+        #                                  y el worker descarta jobs de la vieja
 
         self.T_w_c = np.eye(4)
         self._T_prev = np.eye(4)         # pose anterior (para velocidad constante)
@@ -907,7 +909,7 @@ class PnPTracker(TrackerBase):
             # HILO DE MAPEO (v0.5): BA + bucle + culling van al worker. Se pasa
             # el mp del KF (el worker lo necesita para la escala del bucle) —
             # self._kf habrá avanzado cuando el job se procese.
-            self._map_queue.put((gray, kps, desc, kf_id, mp))
+            self._map_queue.put((self._map_epoch, gray, kps, desc, kf_id, mp))
             return
 
         if self.local_ba:
@@ -936,7 +938,11 @@ class PnPTracker(TrackerBase):
             try:
                 if job is None:
                     return                           # sentinela de apagado
-                gray, kps, desc, kf_id, mp = job
+                epoch, gray, kps, desc, kf_id, mp = job
+                if epoch != self._map_epoch:
+                    continue                         # KF de una sesión MUERTA
+                #   (reset de mapa, v0.9): procesarlo escribiría resultados
+                #   del mapa viejo en el nuevo — se descarta, no es un fallo.
                 if self.local_ba:
                     self._run_local_ba(sync=False)
                 if self.loop_closure:
@@ -945,7 +951,11 @@ class PnPTracker(TrackerBase):
                 with self._map_lock:
                     self.mapper.cull_points(self._kf_ids)
             except Exception:                        # noqa: BLE001
-                self.map_failures += 1
+                # Si la época cambió A MITAD del job, el mapa murió debajo del
+                # worker (reset en vuelo, v0.9): muerte esperada de la sesión,
+                # no un fallo — el job era del mapa viejo y ya no importa.
+                if job is not None and job[0] == self._map_epoch:
+                    self.map_failures += 1
             finally:
                 self._map_queue.task_done()
 
@@ -1305,6 +1315,7 @@ class PnPTracker(TrackerBase):
         deliberadamente fuera de 1.0 (docs/04) — la reloc de v0.4b cubre la
         pérdida transitoria; esto cubre la definitiva."""
         with self._map_lock:
+            self._map_epoch += 1         # los jobs en vuelo del worker mueren
             self._archived_traj.extend(
                 (k, self.mapper.keyframe_pose(k)) for k in self._kf_ids)
             self.reset_events.append(self._frame_idx)
