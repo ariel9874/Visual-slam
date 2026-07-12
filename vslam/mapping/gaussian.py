@@ -277,7 +277,7 @@ class GaussianSplattingMapper(MapperBase):
     def optimize(self, iters: int = 100, lr_scale: float = 1.0,
                  log_every: int = 0, refine_poses: bool = False,
                  exposure: bool = False, densify_every: int = 0,
-                 max_gaussians: int = 500000) -> float:
+                 max_gaussians: int = 500000, lr_decay: float = 0.01) -> float:
         """Ajusta las gaussianas contra los keyframes guardados. Devuelve el
         PSNR medio final sobre las vistas. Barato de reanudar (Adam efímero).
 
@@ -333,15 +333,17 @@ class GaussianSplattingMapper(MapperBase):
         acc_cnt = 0
         H, W, _ = kf_items[0][1]["image"].shape
         g = torch.Generator(device="cpu").manual_seed(0)
-        # Decay exponencial del lr de las MEDIAS (×0.01 al final, como el 3DGS
-        # original): al principio exploran posición, al final se ASIENTAN. Sin
-        # decay, el paso fijo mantiene un jitter perpetuo que se paga como blur
-        # (medido en fr1/desk: 16.4 → 20.9 dB al añadir decay + presupuesto).
+        # Decay exponencial del lr de las MEDIAS (×lr_decay al final, como el
+        # 3DGS original): al principio exploran posición, al final se ASIENTAN.
+        # Sin decay, el paso fijo mantiene un jitter perpetuo que se paga como
+        # blur (medido en fr1/desk: 16.4 → 20.9 dB al añadir decay+presupuesto).
+        # En vivo (hilo, chunks cortos) se pasa lr_decay=1.0: el schedule por
+        # chunk no tiene sentido — el asentamiento lo da el paso del tiempo.
         lr_means0 = 0.002 * lr_scale
         import time
         t0 = time.perf_counter()
         for it in range(iters):
-            opt.param_groups[0]["lr"] = lr_means0 * (0.01 ** (it / max(iters - 1, 1)))
+            opt.param_groups[0]["lr"] = lr_means0 * (lr_decay ** (it / max(iters - 1, 1)))
             kf_id, kf = kf_items[int(torch.randint(len(kf_items), (1,), generator=g))]
             opt.zero_grad()
             T = kf["T"] @ _se3_exp(xi[kf_id]) if refine_poses else kf["T"]
