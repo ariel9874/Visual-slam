@@ -65,6 +65,9 @@ def main() -> int:
     parser.add_argument("--no-ba", action="store_true")
     parser.add_argument("--no-loop", action="store_true")
     parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument("--config", default=None,
+                        help="YAML/JSON con perillas (v0.9; plantilla: "
+                             "python -m vslam.config)")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -83,11 +86,16 @@ def main() -> int:
             K, dist, None, K, (camera.width, camera.height), cv2.CV_32FC1)
 
     ba_backend = "isam2" if args.fast else args.ba
+    cfg = None
+    if args.config:
+        from vslam.config import load_config
+        cfg = load_config(args.config)
     tracker = PnPTracker(camera, extractor=create_extractor(args.detector),
                          matcher=create_matcher(args.matcher),
                          local_window=args.window, local_ba=not args.no_ba,
                          loop_closure=not args.no_loop,
-                         ba_backend=ba_backend, async_mapping=args.fast)
+                         ba_backend=ba_backend, async_mapping=args.fast,
+                         config=cfg)
     # Piso de salud de KF (perilla de re-calibración, v0.45). MEDIDO: es un
     # trade-off dependiente de la secuencia, no una constante universal:
     #   fr1_xyz  → 45: 6.9 cm / 25: 18.4 cm  (bajarlo mete KFs basura, lección 8)

@@ -132,6 +132,11 @@ class PnPTracker(TrackerBase):
     LOOP_COOLDOWN = 40          # frames sin reintentar tras cerrar un bucle
     # ── relocalización + compuerta de movimiento (v0.4b) ──
     RELOC_AFTER = 3             # frames en coast antes de intentar relocalizar
+    LOST_RESET_AFTER = 90       # frames en coast → el mapa es irrecuperable:
+    #                             RESET (degradación elegante, v0.9). El coast
+    #                             extrapola y la reloc reintenta cada frame;
+    #                             si en ~3-6 s nada engancha, seguir arrastrando
+    #                             un mapa muerto solo acumula deriva ciega.
     RELOC_MIN_MATCHES = 150     # más laxo que LOOP: aquí no hay bucle sin sentido
     RELOC_MIN_INLIERS = 40      # inliers PnP para aceptar la relocalización
     GATE_MIN_SAMPLES = 20       # historial mínimo antes de activar la compuerta
@@ -163,7 +168,8 @@ class PnPTracker(TrackerBase):
                  local_ba: bool = True,
                  loop_closure: bool = False,
                  ba_backend: str = "numpy",
-                 async_mapping: bool = False) -> None:
+                 async_mapping: bool = False,
+                 config: Optional[Dict] = None) -> None:
         """Args (además del frontend intercambiable):
             local_window: si se da, el matching 3D-2D usa solo los puntos de
                 los últimos N keyframes (mapa LOCAL: costo acotado, pero la
@@ -245,6 +251,8 @@ class PnPTracker(TrackerBase):
         self._last_loop_frame = -10 ** 9
         self.loop_events: list = []      # [(frame, kf_antiguo)] para informes
         self.reloc_events: list = []     # [(frame, kf_reconocido)] (v0.4b)
+        self.reset_events: list = []     # [frame] resets de mapa (v0.9)
+        self._archived_traj: list = []   # KFs de sesiones muertas (reporting)
 
         self.T_w_c = np.eye(4)
         self._T_prev = np.eye(4)         # pose anterior (para velocidad constante)
@@ -263,6 +271,13 @@ class PnPTracker(TrackerBase):
         self._kf_inliers = 0
         self._frames_since_kf = 0
 
+        # Config declarativa (v0.9): sobreescribe las constantes de clase POR
+        # INSTANCIA, al final del armado (gana a todo lo anterior). Sin config,
+        # comportamiento bit-idéntico a la referencia (vslam/config.py).
+        if config:
+            from vslam.config import apply_config
+            apply_config(self, config.get("tracker", config), "tracker")
+
     # ── API ────────────────────────────────────────────────────────────────────
 
     def process(self, frame: Frame) -> Optional[np.ndarray]:
@@ -278,8 +293,10 @@ class PnPTracker(TrackerBase):
         ORB-SLAM): las poses ONLINE se emiten frame a frame ANTES de las
         correcciones y no las reflejan — medir sobre ellas oculta todo el
         beneficio del backend (medido en fr2_desk: online 22 cm vs final 2 cm).
+        Incluye las sesiones archivadas por resets de mapa (v0.9), en orden.
         """
-        return [(k, self.mapper.keyframe_pose(k)) for k in self._kf_ids]
+        return self._archived_traj + \
+            [(k, self.mapper.keyframe_pose(k)) for k in self._kf_ids]
 
     def process_frame(self, gray: np.ndarray,
                       depth: Optional[np.ndarray] = None
@@ -348,21 +365,27 @@ class PnPTracker(TrackerBase):
         if len(idx) < self.MIN_INIT_POINTS:
             return False                 # profundidad insuficiente: reintentar
 
-        pts_w = self.camera.backproject(np.float64(px), np.float64(zs))
-        kf_id = self._frame_idx          # el mundo ES esta cámara (T = I, metros)
+        # Ancla de la sesión: en el ARRANQUE T_w_c = I (el mundo es esta cámara,
+        # bit-idéntico al comportamiento original); tras un RESET (degradación
+        # elegante, v0.9) es la pose extrapolada — la sesión nueva continúa
+        # donde murió la vieja, sin salto en la trayectoria publicada.
+        T0 = self.T_w_c.copy()
+        pts_c = self.camera.backproject(np.float64(px), np.float64(zs))
+        pts_w = (T0[:3, :3] @ pts_c.T).T + T0[:3, 3]
+        kf_id = self._frame_idx
         with self._map_lock:
             self.mapper.integrate_keyframe(Frame(frame_id=kf_id, timestamp=0.0,
-                                                 T_w_c=np.eye(4), is_keyframe=True))
+                                                 T_w_c=T0, is_keyframe=True))
             ids = self.mapper.add_points(pts_w, desc[idx], anchor_kf_id=kf_id)
             self.mapper.add_observations(kf_id, ids,
                                          self._with_virtual_right(np.float64(px)))
         self._kf_ids = [kf_id]
         mp = dict(zip(idx, ids))
         self._kf_db = [{"id": kf_id, "kps": kps, "desc": desc, "mp": mp}]
-        self.T_w_c = np.eye(4)
-        self._T_prev = np.eye(4)
+        self.T_w_c = T0.copy()
+        self._T_prev = T0.copy()
         self._kf = {"id": kf_id, "kps": kps, "desc": desc, "mp": mp,
-                    "T": np.eye(4)}
+                    "T": T0.copy()}
         self._kf_inliers = len(ids)
         self._frames_since_kf = 0
         self._coast_count = 0
@@ -601,6 +624,9 @@ class PnPTracker(TrackerBase):
                 return [cv2.DMatch(int(i), int(j), float(d))
                         for i, j, d in zip(mi, kj, dd)]
 
+        if len(kps) == 0:            # frame ciego (oclusión total/apagón): sin
+            return []                # candidatos no hay matching (bug v0.9:
+        #                              np.array([]) es (0,) y no broadcastea)
         T_c_w = invert_se3(T_pred)
         pc = (T_c_w[:3, :3] @ map_pts.T).T + T_c_w[:3, 3]      # mapa en cámara pred.
         uv = self.camera.project(pc)                          # (M, 2)
@@ -1262,6 +1288,40 @@ class PnPTracker(TrackerBase):
         self._T_prev = self.T_w_c.copy()
         if not info["state"].startswith("GATE"):
             info["state"] = "COAST"
+        # Degradación elegante (v0.9): si tras LOST_RESET_AFTER frames ni la
+        # reloc ni el coast enganchan, el mapa es IRRECUPERABLE — se archiva y
+        # se arranca una sesión nueva anclada en la pose extrapolada.
+        if self._coast_count >= self.LOST_RESET_AFTER:
+            self._reset_map()
+            info["state"] = "RESET"
+
+    def _reset_map(self) -> None:
+        """Reinicio de mapa (degradación elegante, v0.9): archiva la trayectoria
+        de la sesión muerta (para métricas/reporting), vacía TODO el estado de
+        mapeo y deja el tracker en modo init — la siguiente vista con datos
+        re-inicializa una sesión nueva anclada en self.T_w_c (la pose
+        extrapolada: sin salto en la trayectoria publicada). Las sesiones NO se
+        fusionan si se revisita el mapa viejo: multi-mapa/Atlas queda
+        deliberadamente fuera de 1.0 (docs/04) — la reloc de v0.4b cubre la
+        pérdida transitoria; esto cubre la definitiva."""
+        with self._map_lock:
+            self._archived_traj.extend(
+                (k, self.mapper.keyframe_pose(k)) for k in self._kf_ids)
+            self.reset_events.append(self._frame_idx)
+            self.mapper = type(self.mapper)()
+            if self._isam2 is not None:
+                from vslam.backend.gtsam_isam2 import ISAM2LocalBA
+                self._isam2 = ISAM2LocalBA(self.camera)
+                self._isam2_cursor = {}
+            self._bow = BagOfVisualWords(self.BOW_WORDS)
+            self._kf_ids, self._kf_db = [], []
+            self._kf = None
+            self._init_buffer = []
+            self._initialized = False
+            self._metric = False
+            self._coast_count = 0
+            self._kf_inliers = 0
+            self._frames_since_kf = 0
 
     def _relocalize(self, gray, kps, desc, info) -> bool:
         """Recupera el tracking tras perderlo: reconoce el lugar contra TODA la

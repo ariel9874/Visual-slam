@@ -36,3 +36,8 @@ output/
 .idea/
 Thumbs.db
 .DS_Store
+
+# --- ROS 2 (workspace colcon, se regenera con colcon build) ---
+ros2/build/
+ros2/install/
+ros2/log/
