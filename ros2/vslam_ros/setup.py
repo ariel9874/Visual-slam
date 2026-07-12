@@ -18,7 +18,7 @@ setup(
     maintainer="Ariel Vazquez",
     maintainer_email="ariel98745@gmail.com",
     description="Cascara ROS 2 del Visual-SLAM educativo (nucleo en vslam/).",
-    license="TBD",
+    license="MIT",
     entry_points={
         "console_scripts": [
             "dataset_node = vslam_ros.dataset_node:main",

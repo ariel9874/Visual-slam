@@ -10,7 +10,7 @@
     frontera (ros2/README.md).
   </description>
   <maintainer email="ariel98745@gmail.com">Ariel Vazquez</maintainer>
-  <license>TBD</license>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
