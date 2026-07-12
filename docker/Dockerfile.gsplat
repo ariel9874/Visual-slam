@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Contenedor GPU: mapa denso 3DGS (v0.7) con el rasterizador CUDA `gsplat`.
+#
+#   Por qué un contenedor y no el env nativo (lección 40)
+#   En Windows, gsplat NO enlaza: sus kernels compilan, pero el frontend host de
+#   nvcc (cudafe++) y cl.exe divergen al comprimir las back-references del
+#   mangling de plantillas con ~28 argumentos → 38 símbolos sin resolver
+#   (LNK2019). No es un bug nuestro ni de flags, y no depende de la versión de
+#   MSVC (probado con 14.44 y 14.39). En Linux/gcc ese mangling no existe: gsplat
+#   compila limpio. El contenedor es, por tanto, la vía CORTA al kernel CUDA —
+#   que la medición demostró que es la pieza HABILITANTE del criterio de v0.7
+#   (PyTorch puro: 516 ms/iter con solo 15k gaussianas; hacen falta ~100-500k).
+#
+#   Este contenedor es INDEPENDIENTE del docker/Dockerfile de ROS (v0.8): aquel
+#   es CPU + ROS 2; este es GPU + torch, y solo corre el mapper denso.
+#
+# Uso (desde la raíz del repo):
+#   docker build -f docker/Dockerfile.gsplat -t vslam-gsplat .
+#   docker run --rm --gpus all -v "${PWD}:/workspace" vslam-gsplat \
+#       python examples/07_gaussian_mapping.py --root data/tum/... --backend gsplat
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Imagen oficial de PyTorch: torch 2.6 + CUDA 12.4 + cuDNN. La variante `devel`
+# (no `runtime`) trae nvcc y las cabeceras de CUDA: gsplat compila sus kernels
+# en el primer import (JIT) y aquí sí enlaza, porque el mangler es gcc.
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# OpenCV (los loaders/undistort del núcleo) + libs de sistema que pide cv2.
+# numpy<2 se respeta como en el resto del proyecto (la imagen trae 1.26.x).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git \
+      libgl1 \
+      libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir "numpy<2" "opencv-python-headless<4.10"
+
+# gsplat desde el índice que corresponde a torch 2.6 + CUDA 12.4. En Linux la
+# compilación JIT del primer import funciona (gcc), a diferencia de Windows.
+RUN pip install --no-cache-dir gsplat \
+      --index-url https://docs.gsplat.studio/whl/pt26cu124 \
+      --extra-index-url https://pypi.org/simple
+
+# Arquitectura de la GPU del equipo (RTX 4070 Laptop = Ada, compute 8.9): evita
+# compilar todos los targets en el primer import.
+ENV TORCH_CUDA_ARCH_LIST=8.9
+
+# El repo se monta en /workspace; paquete Python puro → basta PYTHONPATH.
+ENV PYTHONPATH=/workspace
+WORKDIR /workspace
+
+CMD ["bash"]
