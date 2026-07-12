@@ -3,16 +3,24 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vslam"
-version = "0.1.0"
-description = "Visual SLAM educativo y modular: frontend de tracking, backend de grafos de factores y mapeo intercambiable (preparado para 3DGS/NeRF y ROS 2)."
+name = "vslam-edu"
+version = "1.0.0"
+description = "Visual SLAM educativo y modular: frontend de tracking, backend de grafos de factores y mapeo intercambiable (3DGS y ROS 2 incluidos; cada decision medida)."
 readme = "README.md"
-requires-python = ">=3.9"
-authors = [{ name = "Ariel" }]
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Ariel Eliezer Vazquez Dominguez", email = "ariel98745@gmail.com" }]
 keywords = ["slam", "visual-odometry", "robotics", "computer-vision", "gaussian-splatting"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
 dependencies = [
-    "numpy>=1.24",
-    "opencv-python>=4.8",
+    "numpy>=1.24,<2",          # gtsam (extra) exige <2; el nucleo lo respeta
+    "opencv-python>=4.8,<5",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +29,10 @@ dev = ["pytest>=7"]
 # Frontends aprendidos (SuperPoint/DISK/LightGlue, ver docs/03 y frontend/learned.py).
 # Además: pip install git+https://github.com/cvg/LightGlue.git
 deep = ["torch>=2.0", "kornia>=0.7"]
+# Backends GTSAM (batch/iSAM2, C++): pip trae ruedas manylinux/win.
+gtsam = ["gtsam>=4.2"]
+# Mapper denso 3DGS (v0.7). gsplat NO es extra pip: solo Linux/Docker (docs/06).
+dense = ["torch>=2.0"]
 
 [tool.setuptools.packages.find]
 include = ["vslam*"]

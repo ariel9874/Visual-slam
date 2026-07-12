@@ -20,7 +20,7 @@ explícitamente desde sus módulos.
 ──────────────────────────────────────────────────────────────────────────────
 """
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 from vslam.config import apply_config, load_config
 from vslam.core.camera import PinholeCamera

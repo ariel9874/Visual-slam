@@ -99,13 +99,26 @@ Cada bloque del ejemplo indica a qué módulo de `vslam/` corresponde en la arqu
 - [x] **v0.3** — Backend real: álgebra de Lie SE(3) ([vslam/core/lie.py](vslam/core/lie.py)) + optimizador de grafo de poses en NumPy puro (Gauss-Newton/LM con kernel Huber, [vslam/backend/pose_graph.py](vslam/backend/pose_graph.py)) + demo de cierre de bucle con re-anclaje del mapa ([examples/03_pose_graph_loop.py](examples/03_pose_graph_loop.py)): ATE 1.09 m → 0.05 m con un solo factor de bucle.
 - [x] **v0.35** — Backend integrado al tracker: **BA local** con jacobianos analíticos y complemento de Schur ([vslam/backend/bundle_adjustment.py](vslam/backend/bundle_adjustment.py)) — ORB pasa de 6.9 a **2.6 cm** de ATE; **mapa local** (costo acotado), keyframes con intervalo máximo y piso de salud, y **cierre de bucle visual** (reconocimiento de lugar + verificación PnP + corrección de similitud CON escala, [examples/04_loop_closure.py](examples/04_loop_closure.py)): 8.4 → 6.7 cm en la secuencia de corredor con re-visita.
 - [x] **v0.4a** — Consistencia: álgebra **Sim(3)** ([vslam/core/lie.py](vslam/core/lie.py)) + grafo de poses genérico por grupo (el experimento de Strasdat reproducido en tests: la deriva de escala que SE(3) no puede corregir), **mapa local por covisibilidad** — el gran salto: el corredor con re-visita pasa de 8.4 a **2.2 cm** (criterio de v0.4 cumplido) — filtro anti-duplicados y cierre de bucle Sim(3) con puente de covisibilidad.
-- [ ] **v0.4b** — Relocalización (recuperación de secuestro), culling de puntos, adaptador GTSAM.
-- [ ] **v0.45** — Datos reales: loaders TUM/EuRoC/KITTI, modelo de distorsión, benchmark batch + CI.
-- [ ] **v0.5** — Tiempo real: núcleo C++ (pybind11) + adaptador GTSAM/iSAM2.
-- [ ] **v0.6** — RGB-D y estéreo: escala métrica real.
-- [ ] **v0.7** — La tesis cumplida: `GaussianSplattingMapper` asíncrono detrás de `MapperBase`.
-- [ ] **v0.8** — ROS 2 (lifecycle nodes componibles, demo con rosbag y cámara real).
-- [ ] **v0.9 → v1.0** — Endurecimiento, congelación de API, PyPI y benchmarks publicados.
+- [x] **v0.4b** — Relocalización (recuperación de secuestro < 2 s), culling de puntos.
+- [x] **v0.45** — Datos reales TUM: **fr2_xyz 0.4 / fr1_xyz 1.8 / fr2_desk 2.1 cm** (nivel ORB-SLAM), SuperPoint/LightGlue integrados.
+- [x] **v0.5** — Tiempo real: matching en C++ (pybind11) + GTSAM/iSAM2 + hilo de mapeo + BoW → **46.7 fps** en fr2_desk (pedía 30).
+- [x] **v0.6** — Métrico: RGB-D **fr1_desk 2.8 / fr2_xyz 1.5 cm** (escala ≈ 1) y estéreo real EuRoC **V1_01 6.9 cm** (residuo [u,v,u_R] en el BA, también en GTSAM).
+- [x] **v0.7** — La tesis cumplida: `GaussianSplattingMapper` detrás de `MapperBase` — **21.0 dB en fr1/desk full-res** (paridad SOTA; gsplat en Docker) y EN VIVO en proceso propio sin robar frames ([docs/06](docs/06_mapa_denso_3dgs.md)).
+- [x] **v0.8** — ROS 2: 4 nodos (lifecycle), TF REP-105, demo RViz en vivo (TUM y EuRoC) sin tocar el núcleo.
+- [x] **v0.9** — Endurecimiento: config declarativa, reset de mapa, épocas de concurrencia, API congelada (16 nombres), MIT.
+- [x] **v1.0** — Empaquetado PyPI (`vslam-edu`), LICENSE, CONTRIBUTING, benchmarks publicados.
+
+### Benchmarks (v1.0, medidos en este repo)
+
+| secuencia | modo | resultado | nota |
+|---|---|---|---|
+| TUM fr2_xyz | RGB-D métrico | **ATE 1.5 cm** (escala 0.96) | 80 bucles |
+| TUM fr1_desk | RGB-D métrico | **ATE 2.8 cm** (escala 1.005) | 0 perdidos |
+| TUM fr2_desk | mono + `--fast` | **ATE 1.4-2.1 cm** | **46.7 fps** CPU |
+| EuRoC V1_01_easy | estéreo real | **ATE 6.9 cm** (escala 1.002) | SGBM, 27 bucles |
+| TUM fr1_desk | 3DGS re-render | **PSNR 21.0 dB** | paridad SOTA, 20 ms/iter |
+
+Cada número con su comando de reproducción en [docs/05 §3.2](docs/05_estado_y_plan_de_continuacion.md).
 
 El plan detallado — con criterios de aceptación medibles por etapa, riesgos y lo que
 deliberadamente queda fuera de 1.0 — está en [docs/04_hoja_de_ruta_v1.md](docs/04_hoja_de_ruta_v1.md).

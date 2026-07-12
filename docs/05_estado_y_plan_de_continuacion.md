@@ -4,7 +4,12 @@
 > asistente) que continúe el desarrollo. Contiene TODO lo necesario para
 > retomar el trabajo sin re-descubrir nada: contexto, metodología, estado
 > exacto con números, lecciones medidas, deuda técnica y el siguiente paso
-> detallado. Última actualización: julio 2026, al cierre de **v0.4b**.
+> detallado. Última actualización: julio 2026, **v0.7 COMPLETA (pendiente de
+> commit)** — mapa denso 3DGS: 21.0 dB en fr1/desk full-res (criterio
+> recalibrado a paridad SOTA ≥21; gsplat SOLO en Docker por el mangling de
+> Windows) + mapper denso EN VIVO en proceso propio (+25% de latencia medida,
+> 0 frames perdidos). Lecciones 39-42. v0.6 CERRADA: RGB-D fr1 2.8/fr2 1.5 cm,
+> estéreo V1_01 6.9 cm, `--fast` en paridad (lecciones 35-38).
 
 ---
 
@@ -103,7 +108,12 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
 | v0.35 | BA local (Schur), mapa local, observaciones, cierre de bucle visual, examples/04, secuencia corredor | ORB forward 2.6→3.1 cm; corredor 8.4/6.7 cm |
 | v0.4a | Álgebra Sim(3), grafo genérico por grupo, bucle Sim(3), **covisibilidad**, filtro anti-duplicados | **corredor 2.2 cm** (criterio < 3 cumplido) |
 | v0.4b | **Relocalización** (PnP global), **compuerta de movimiento** (emparejada), **culling de puntos**, helper `_match_against_kf` compartido, test de secuestro | corredor **2.0 cm**; secuestro recuperado en **2 frames**; culling **-33.9%** del mapa |
-| v0.45 (en progreso) | **Datos REALES**: distorsión Brown-Conrady, loader TUM RGB-D, driver `examples/05`, benchmark batch, **matching guiado por reproyección**, re-anclaje de mapa local tras reloc, **BA global offline** (50 iters), métrica de trayectoria final de KFs | **TUM movimiento moderado (trayectoria final de KFs): fr2_xyz 0.4 / fr1_xyz 1.8 / fr2_desk 2.1 cm**, 0 colapsos. En 6 secuencias, las fr1 handheld se pierden y fr3 deriva (límites del frontend mínimo, lección 28). Sintético mejoró: 02 2.4, 04 1.7, secuestro 1.1 cm |
+| v0.45 CERRADA | **Datos REALES**: distorsión Brown-Conrady, loader TUM RGB-D + EuRoC, benchmark batch, CI, **matching guiado**, **BA global offline**, métrica de trayectoria final de KFs, **SuperPoint+LightGlue** integrados | **TUM movimiento moderado (final de KFs): fr2_xyz 0.4 / fr1_xyz 1.8 / fr2_desk 2.1 cm**, 0 colapsos. Límites medidos (lecciones 28-29): fr1 handheld (SuperPoint rescata: 560→140) y fr3 deriva. Sintético: 02 2.4, 04 1.7, secuestro 1.1 cm |
+| v0.5 CERRADA | **Tiempo real**: perfilado dirigido (regla 3), BA GTSAM batch + **iSAM2 incremental**, **matching guiado en C++** (pybind11, `vslam_cpp`), **hilo de mapeo** (async, delta pendiente), **BoW** (k-medias Hamming + tf·idf). Stack rápido opt-in (`--fast`); referencia NumPy intacta | **Criterio CUMPLIDO: 46.7 fps en fr2_desk** (pedía 30) a 640×480 en CPU, mediana 17 ms, p99 73 ms, ATE-KF 1.4 cm (paridad). Trayectoria: 4.3→9.5→18.7→25.7→46.7 fps (lecciones 30-34: medir, mover, eliminar) |
+| v0.6 hito 1 | **RGB-D MÉTRICO**: profundidad en loader TUM, init instantánea por retro-proyección (`_metric`), puntos de KF desde profundidad, Umeyama RÍGIDO (`--depth`), **bucle métrico en SE(3)** (lección 35: Sim(3) re-escalaba el mapa métrico y componía — 22 cm/escala 2.09 → fix), test del cebo de escala | **fr2_xyz 4.7 cm MÉTRICO (escala 1.036), 0 perdidos — criterio <5 CUMPLIDO** (sin bucles: 1.1 cm). fr1_desk 6.7 cm en aquel momento — que resultó medido sobre un mapa MIXTO (ver hito 2) |
+| v0.6 hito 2 | **Residuos de PROFUNDIDAD en el BA** (estéreo virtual ORB-SLAM2: u_R = u − bf/z, residuo [u,v,u_R], `STEREO_BF=40`) + **bug raíz de fr1_desk**: su stream depth arranca tarde → init MONOCULAR accidental → mapa mixto gauge/metros con `_metric=False` (escala 1.008 de casualidad); fix: el driver espera profundidad + invariante "puntos desde depth SOLO en mapa métrico" (lección 36) | **CRITERIO v0.6 CUMPLIDO en ambas**: **fr1_desk 2.8 cm MÉTRICO** (escala 1.005, 0 perdidos, online 3.4) y **fr2_xyz 1.5 cm** (escala 0.96, 80 bucles; antes 4.7). Ablación fr1 sin residuo: 12.8 cm, 244 perdidos — el residuo ES lo que cruza el episodio 200-340 |
+| v0.6 hito 3 | **ESTÉREO REAL** (EuRoC): `EuRoCStereoRig` (rectificación cv2.stereoRectify, bf desde P2) + `EuRoCStereoLoader` (disparidad StereoSGBM → profundidad densa, MISMA firma que RGB-D); `examples/06 --stereo`. La cámara derecha virtual se vuelve real: u_R medido, mismo residuo del BA (lección 37) | **V1_01_easy ESTÉREO (final de KFs): 6.9 cm rmse, escala similitud 1.002** (234 KFs, 27 bucles SE(3), 34 perdidos) — métrico real sobre dron 6-DoF. Rig verificado: baseline 11.01 cm, bf 48.0. Tests: tests/test_stereo.py (2, sin el dataset) |
+| v0.7 hito 1-2 | **MAPA DENSO 3DGS**: rasterizador diferenciable EWA (gaussian_render.py, PyTorch puro) + `GaussianSplattingMapper` detrás de MapperBase (siembra desde la nube dispersa, optimize=renderiza-y-compara, update_poses rígido por submapa). Ejemplo 07 sobre fr1/desk (lección 39) | Rasterizador y mapper verdes: sobreajuste de vista **PSNR > 30 dB**, multi-vista **> 30 dB**, gradiente por diferencias finitas, update_poses rígido exacto. fr1/desk real: EN PROGRESO (render a resolución reducida; full-res = gemela gsplat pendiente). Tests: test_gaussian_render.py (3), test_gaussian_mapper.py (2) |
 
 ### 3.2 Números de referencia actuales (para detectar regresiones)
 
@@ -144,6 +154,39 @@ python tests/test_relocalization.py
 #   fr1_xyz 1.8 cm | fr2_desk 2.1 cm | fr2_xyz 0.4 cm | ≤5 perdidos, 0 relocs
 python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg1_xyz
 python scripts/benchmark_tum.py --data data/tum          # tabla batch por secuencia
+
+# RGB-D MÉTRICO (v0.6, --depth): ATE con alineación RÍGIDA (sin regalar escala)
+# y la escala de similitud como chequeo (≈1.0 = mapa en metros de verdad).
+# Con residuos de profundidad en el BA (hito 2, columna FINAL-KF):
+#   fr1_desk 2.8 cm métrico (escala 1.005, 0 perdidos, 3 bucles; online 3.4)
+#   fr2_xyz  1.5 cm métrico (escala 0.96, 80 bucles SE3, 0 perdidos)
+#   El driver salta frames iniciales SIN depth ("saltados sin depth: 17" en
+#   fr1_desk es lo esperado — sin eso, init monocular y mapa mixto, lección 36).
+#   Ablación (STEREO_BF=0, solo init métrica): fr1_desk 12.8 cm y 244 perdidos —
+#   el residuo de profundidad es lo que cruza el episodio 200-340 (lección 28);
+#   no re-abrir la biestabilidad con perillas si estos números se sostienen.
+python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg1_desk --depth
+python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg2_xyz --depth
+python tests/test_rgbd.py                 # 5 tests (Umeyama rígido, init, bucle SE3,
+                                          #          BA con u_R nulo/observable, loader)
+# --fast --depth (stack rápido iSAM2 con FACTOR ESTÉREO GTSAM, lección 38):
+#   fr2_xyz 1.4 cm / fr1_desk 2.5 cm métrico — paridad con NumPy, a 30+ fps.
+python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg2_xyz --depth --fast
+
+# ESTÉREO REAL (v0.6 hito 3, EuRoC): cam0+cam1, disparidad SGBM → profundidad
+# métrica → MISMA ruta RGB-D. La izquierda RECTIFICADA es la cámara del tracker.
+#   V1_01_easy (final de KFs): 6.9 cm métrico, escala similitud 1.002, 234 KFs
+#   El host oficial (robotics.ethz.ch) suele estar caído; mirror ASL en HF:
+#   https://huggingface.co/datasets/pepijn223/euroc-mirror (V1_01_easy.zip ~1.1GB)
+#   Descomprimir en data/euroc/V1_01_easy (queda mav0/cam0, cam1, ground truth).
+python examples/06_euroc.py --root data/euroc/V1_01_easy --stereo
+python tests/test_stereo.py               # 2 tests (rig: bf=fx·b; depth por disparidad)
+
+# MAPA DENSO 3DGS (v0.7, torch+CUDA): rasterizador diferenciable + mapper.
+python tests/test_gaussian_render.py      # 3 (proyección, gradiente FD, sobreajuste >30 dB)
+python tests/test_gaussian_mapper.py      # 2 (multi-vista >30 dB, update_poses rígido)
+python examples/07_gaussian_mapping.py --root data/tum/rgbd_dataset_freiburg1_desk
+#   (siembra desde la nube dispersa + optimiza; PSNR de re-render a res. reducida)
 ```
 
 Notas: el modo `--no-ba` del ejemplo 04 da ~200 cm — es un modo de fallo
@@ -160,6 +203,8 @@ vslam/core/      camera.py (pinhole+math), frame.py (contrato), geometry.py
                  lie.py (SO3/SE3/Sim3 Exp/Log — Sim3 validada vs serie),
                  trajectory.py (TUM + cuaterniones Shepperd)
 vslam/frontend/  features.py (registro: orb/akaze/brisk/sift/kaze/gftt-orb),
+                 place_recognition.py (BoW: k-medias Hamming/L2 + índice
+                 invertido + tf·idf, v0.5),
                  matching.py (ratio/crosscheck/flann, firma con kps para
                  aprendidos), learned.py (SuperPoint/DISK/LightGlue,
                  EXPERIMENTAL, requiere [deep]), tracker.py (PnPTracker: el
@@ -167,8 +212,11 @@ vslam/frontend/  features.py (registro: orb/akaze/brisk/sift/kaze/gftt-orb),
                  tocarlo. v0.45: _guided_match (matching por reproyección),
                  _local_ref_kf (re-anclaje del mapa local tras reloc),
                  global_bundle_adjustment (BA global OFFLINE, lo llama el driver),
-                 keyframe_trajectory (métrica final vs online))
-vslam/backend/   factor_graph.py (interfaz + teoría MAP), pose_graph.py
+                 keyframe_trajectory (métrica final vs online),
+                 _mapping_worker/wait_mapping (HILO DE MAPEO async, v0.5))
+vslam/backend/   factor_graph.py (interfaz + teoría MAP), gtsam_ba.py (BA batch
+                 GTSAM, ≡ referencia NumPy), gtsam_isam2.py (BA INCREMENTAL
+                 iSAM2 con reset por época, v0.5), pose_graph.py
                  (GaussNewtonPoseGraph genérico se3/sim3),
                  bundle_adjustment.py (BA con Schur + jacobianos analíticos)
 vslam/mapping/   base.py (MapperBase), sparse.py (puntos+observaciones+
@@ -186,8 +234,12 @@ examples/        01 (2D-2D didáctico autocontenido), 02 (PnP+BA),
 scripts/         make_synthetic_sequence.py (forward: 3 planos; loop:
                  corredor de carteles disjuntos), benchmark_frontends.py,
                  benchmark_tum.py (tabla batch por secuencia TUM, v0.45)
-tests/           5 archivos de geometría (21 tests) + test_relocalization.py
-                 (secuestro, v0.4b), todos con runner __main__
+cpp/             CMakeLists.txt (módulo pybind11 vslam_cpp, v0.5) +
+                 src/guided_match.cpp (gemelo C++ del matching guiado) +
+                 include/vslam/core/frame.hpp (contratos)
+tests/           5 archivos de geometría (21 tests) + secuestro (v0.4b) +
+                 distorsión/EuRoC (v0.45) + equivalencias gtsam_ba y
+                 guided_match_cpp (v0.5), todos con runner __main__
 docs/            01 estado del arte, 02 arquitectura, 03 detectores,
                  04 hoja de ruta a v1.0, 05 este documento
 ```
@@ -417,6 +469,414 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
       (dist=0, la "ROS default" de TUM) sesga la geometría, y/o un recorrido
       largo complejo cuyos bucles solo atan el final. Verificar si TUM publica
       distorsión real para fr3; si no, es límite del modelo pinhole ideal.
+29. **SuperPoint + LightGlue RESCATAN las fr1 handheld** (v0.45): el frontend
+    aprendido (learned.py, verificado por fin en GPU — RTX 4070) transforma
+    fr1_desk de FALLO a funcional. Medido (ATE-KF / frames perdidos, GBA incl.):
+    - ORB+ratio:            2.2* / **560**   (*sobre 7 KFs, sin sentido)
+    - SuperPoint+ratio:     3.2  / 168       (56 KFs → trackea el grueso)
+    - SuperPoint+LightGlue: 4.9  / **140**   (menos perdidos + 6 bucles vs 2)
+    Los descriptores de SuperPoint (256-D float, robustos a blur/rotación) hacen
+    que el matching guiado enganche (~330 matches/frame) donde ORB fallaba, y
+    LightGlue (atención espacial 2D-2D) añade robustez en init/loop/reloc.
+    Integración: LightGlue solo empareja 2D-2D (necesita kps de ambos lados) →
+    el tracker usa `self.matcher` (LightGlue) para init/KF-a-KF/loop-reloc y un
+    `_desc_matcher` de ratio para el matching 3D-2D contra el mapa y la 3ª vista
+    (sin kps del mapa). Con ORB+ratio, `_desc_matcher` es el mismo → sin cambio.
+    Coste: SuperPoint ~224 ms/frame + LightGlue ~144 ms (GPU). Uso:
+    `examples/05 --detector superpoint --matcher lightglue`.
+    **Los 140 perdidos NO son de umbral** (medido, contra la intuición): cuando
+    SuperPoint trackea, los inliers son ALTOS (p10=91 ≫ KF_HEALTH=45), así que
+    recalibrar no rescata — y se aisló que los 140 son UN episodio contiguo
+    (frames 200-340; el resto 0 perdidos), no rotación (GT: 1.0°/frame ahí, MENOS
+    que en la zona sana). Es estructural: tracking se pierde al entrar a una zona,
+    que —ya perdido— no se mapea y no admite reloc hasta volver a territorio
+    conocido. Pide robustez de movimiento (KLT/IMU) o re-mapeo, no un umbral.
+    Moraleja (otra vez): medir antes de recalibrar — el lever "obvio" no lo era.
+30. **Perfilar refuta la intuición de rendimiento** (v0.5): el criterio 30 fps
+    exigía saber DÓNDE se va el tiempo. docs/04 apostaba por extracción+matching+
+    PnP; el perfilador dijo otra cosa (fr2_desk/ORB, 4.3 fps): **BA local 57%**
+    (pico 2 s/KF), **matching guiado 37%** (TRACK 93 ms), y cv2 (ORB/BF/PnP)
+    solo **8%** — porque cv2 YA es C nativo; lo caro es el código Python/NumPy
+    (BA con 1.67M evals de residuo/jacobiano; guiado con su bucle por punto).
+    Portar cv2 habría sido esfuerzo tirado. Primer port según el dato: el BA →
+    **adaptador GTSAM** (mismo problema, test de equivalencia exacto): KF-frame
+    1382→385 ms (3.6×), fps 5.8→9.5, mismo ATE. Regla 3 del repo en acción:
+    solo se reescribe lo que el perfilador señala, y la gemela pasa los tests.
+31. **El primer módulo C++ (pybind11) pone el TRACKING en tiempo real** (v0.5):
+    `cpp/src/guided_match.cpp` (módulo `vslam_cpp`) es el gemelo EXACTO del
+    matching guiado — misma matemática, y la misma semántica de desempate que
+    np.argmin (ante empate de Hamming gana el índice menor; sin eso la
+    equivalencia par a par falla). Verificado por tests/test_guided_match_cpp.py
+    (5 escenas, uint8/Hamming y float32/L2, casos límite). Medido en fr2_desk
+    (con BA GTSAM): frames TRACK **110→29 ms** (3.7×, ya bajo el presupuesto de
+    33 ms = 30 fps), fps global 7.6→**18.7**, ATE idéntico (1.6 cm). El tracker
+    usa la ruta C++ AUTOMÁTICAMENTE si el .pyd existe (`self.use_cpp`; False
+    fuerza la referencia Python). Compilación: cpp/CMakeLists.txt (VS Build
+    Tools/MSVC en Windows; el .pyd queda en la raíz del repo, gitignored).
+    El cuello restante son los frames KF (~380 ms: BA GTSAM síncrono) → iSAM2
+    incremental o BA en hilo aparte es el siguiente lever hacia 30 fps sostenidos.
+32. **iSAM2 hace el BA incremental casi gratis — y desnuda al VERDADERO cuello
+    del keyframe** (v0.5). Backend `ISAM2LocalBA` (`ba_backend="isam2"`): un solo
+    grafo de sesión; cada KF solo re-linealiza las cliques afectadas del árbol
+    de Bayes. Integración con 4 reglas medidas: (a) los puntos ENTRAN con ≥2 obs
+    (con 1, IndeterminantLinearSystemException — lección 19 en el backend; buffer
+    de pendientes); (b) consumo incremental por CURSORES sobre mapper._obs crudo
+    (la vista filtrada encoge con el culling y rompería índices); (c) gauge por
+    priors en 2 poses por época; (d) RESET tras cada cierre de bucle (la Sim(3)
+    externa invalida la linealización) con re-siembra anclada por priors
+    (historia congelada, lección 11). Medido: corredor KF 2060→82 ms (25× vs
+    numpy), 49 fps; fr2_desk paridad de ATE (1.5 cm), 0 fallos con 2 bucles.
+    PERO en fr2_desk el KF-frame apenas bajó (330→320 ms): el perfil muestra que
+    el BA ya era marginal (gtsam.update: 34 ms/KF) — el cuello real es el
+    RECONOCIMIENTO DE LUGAR del bucle (knnMatch contra TODA la _kf_db: ~9.4 s de
+    17.6 s del _insert_keyframe) + culling/filtros. Moraleja: optimizar el BA
+    otra vez habría sido inútil; el siguiente lever es el HILO DE MAPEO
+    (bucle+BA+culling fuera del hilo de tracking, arquitectura ORB-SLAM) y/o
+    BoW para el reconocimiento de lugar (deuda de §8 desde v0.35).
+33. **El HILO DE MAPEO compra CONSISTENCIA de latencia, no throughput** (v0.5,
+    `async_mapping=True`): el bloque pesado del KF (BA + bucle + culling) va a
+    un worker; el tracking solo triangula e inserta. Medido en fr2_desk (isam2 +
+    C++ guiado): **p99 400→126 ms, max 677→197 ms** — desaparecen los picos de
+    KF, que es el criterio real de tiempo real — con paridad de ATE (1.6 cm),
+    mismos bucles y 0 fallos del worker. El precio: la MEDIANA sube (24.6→34.6
+    ms) por contención de GIL/CPU (gtsam no suelta el GIL en update/optimize;
+    cv2 y vslam_cpp sí — a este le añadimos gil_scoped_release). Diseño clave:
+    (a) lock SOLO en las secciones de lectura/escritura del mapa, cómputo
+    pesado fuera; (b) el worker NUNCA toca T_w_c (heredar una pose vieja sería
+    teletransporte); las correcciones del bucle llegan como DELTA pendiente
+    (T_nuevo·T_viejo⁻¹, rígido) que el tracking aplica al inicio del siguiente
+    frame — el mismo patrón que reloc/GBA; (c) el job lleva SU kf_id/mp (el
+    _kf del tracker ya avanzó); (d) wait_mapping() drena antes de leer
+    resultados (el GBA offline lo llama solo). [tracker._mapping_worker;
+    test_async_mapping.py]
+34. **BoW cierra el criterio de v0.5: 46.7 fps** (place_recognition.py). El
+    reconocimiento de lugar por fuerza bruta (knnMatch contra TODA la _kf_db)
+    era el coste dominante del keyframe (lección 32); el hilo lo escondía pero
+    pagaba GIL. BoW lo ELIMINA: vocabulario de 512 palabras entrenado EN SESIÓN
+    (k-medias en espacio de Hamming — el centroide binario es el VOTO DE
+    MAYORÍA por bit, la mediana coordenada a coordenada; ~50 ms una vez con los
+    primeros 5 KFs), cuantización por BFMatcher (C++, ~2 ms), índice invertido
+    + tf·idf coseno (Sivic & Zisserman 2003). Query: **2.7 ms**, recall top-2
+    1.00 (test sintético); solo TOP-5 candidatos pagan verificación geométrica.
+    Medido en fr2_desk (isam2 + C++ guiado): sync 23.9→**43.7 fps**; async
+    25.7→**46.7 fps**, mediana 34.6→17.0 ms (el worker dejó de acaparar el
+    GIL), p99 73 ms, ATE-KF **1.4 cm** (paridad). Con esto, **el criterio de
+    v0.5 (30 fps a 640×480 en CPU, mismo ATE) queda CUMPLIDO en fr2_desk**:
+    4.3→9.5→18.7→25.7→46.7 fps por perfilado dirigido, nunca a ciegas.
+    Matiz de rigor del módulo: la norma tf·idf del documento usa el idf de
+    TODAS sus palabras (no solo las del query) o el coseno queda mal normalizado.
+    use_bow=False restaura la fuerza bruta de referencia. [lección 32→33→34:
+    medir, mover, eliminar]
+35. **El grupo del cierre de bucle depende de QUIÉN fija la escala** (v0.6,
+    RGB-D). El primer criterio RGB-D falló espectacularmente: fr2_xyz completa
+    daba ATE MÉTRICO 22.1 cm con escala de similitud **2.09** (el humo de 200
+    frames, sin bucles aún, daba 0.7 cm/0.96). Diagnóstico en dos patas:
+    (a) ABLACIÓN — sin cierre de bucle, la misma secuencia da **1.1 cm /
+    escala 0.977** (la escala métrica NO deriva: por ventanas de 400 frames se
+    queda en 0.90-1.09 los 3669 frames); (b) MECANISMO — espía sobre el
+    Umeyama del bucle: los 77 bucles empiezan midiendo s_rel ≈ 1 (1.001,
+    0.971...) y DEGENERAN hasta 0.03, porque cada corrección Sim(3) re-escala
+    el mapa viejo mientras los puntos nuevos siguen naciendo métricos desde el
+    sensor → el siguiente bucle mide la discrepancia que el anterior CREÓ y
+    la "corrige" otra vez: composición de error (escala por ventanas 0.92 →
+    3.29, escalón a escalón con los bucles). La moraleja de fondo: en
+    monocular la escala es GAUGE y el bucle debe medirla y redistribuirla
+    (Sim(3), Strasdat — lección de v0.4, sigue siendo correcta AHÍ); en RGB-D
+    la escala es una MEDICIÓN y no se negocia — el bucle métrico va en
+    **SE(3)** (s_rel = 1, información 6×6), que es exactamente la decisión de
+    ORB-SLAM2. Fix: flag `_metric` (lo enciende la init RGB-D) elige el grupo
+    en `_try_close_loop`; `update_poses_sim3` con similitudes de s=1 ya es
+    rígido solo (det(R)^⅓ = 1), el resto del pipeline no se toca. Resultado:
+    fr2_xyz completa **4.7 cm MÉTRICO / escala 1.036** con los mismos 80
+    bucles, 0 perdidos — criterio (<5 cm) CUMPLIDO. Test formal:
+    test_metric_loop_is_rigid (bucle fabricado con nube duplicada a 1.2× de
+    cebo: la rama monocular DEBE re-escalar; la métrica NO mueve un punto).
+    Matiz honesto medido: en fr2_xyz sin bucles queda 1.1 cm — con deriva tan
+    pequeña, el bucle corrige menos de lo que ensucia (bridge obs + grafo
+    sobre 246 KFs); posible refinamiento futuro (cerrar solo con deriva
+    detectada), no se persigue ahora.
+
+36. **El mapa métrico necesita que el BA MIDA metros — y un resultado
+    bit-idéntico es un bug, no una meseta** (v0.6 hito 2, la lección que cerró
+    el criterio). Dos historias entrelazadas. (a) EL RESIDUO: el BA de
+    reproyección solo ve píxeles — re-teje la estructura pero no tiene de
+    dónde corregir la deriva métrica (fr1_desk estancado en 6.7 cm con error
+    REPARTIDO: p50 7.8 cm, el peor 10% de frames solo aporta el 38% del error
+    cuadrático — estructura global, no un episodio). El fix es el de ORB-SLAM2:
+    la profundidad entra al BA como cámara derecha VIRTUAL, u_R = u − bf/z
+    (`STEREO_BF = 40` ≈ fx·b del Kinect), residuo [u, v, u_R] — todo en
+    píxeles (misma Huber, mismo Schur) y el peso de la profundidad decae con
+    z² solo, como el ruido del sensor. Test del mecanismo:
+    test_ba_depth_residual_makes_scale_observable (con UNA cámara fija la
+    escala es espacio nulo del BA 2D — el par nulo/observable discrimina).
+    (b) EL BUG: la primera medición con el residuo dio fr1_desk 6.7 cm
+    BIT-IDÉNTICO al baseline (mismos bucles, mismos decimales) — en un sistema
+    caótico eso no es "mejora nula", es "el código nuevo no se ejecuta". La
+    sonda lo confirmó: `_metric=False`. El stream depth de fr1_desk arranca
+    ~6 frames tarde (asociación rgb↔depth sin pareja → depth=None), el tracker
+    caía a la init MONOCULAR y nacía un mapa MIXTO: init a escala gauge +
+    puntos posteriores desde profundidad en metros — con la escala 1.008 de
+    PURA CASUALIDAD (la mediana del escritorio ≈ 1 m ≈ gauge mediana=1), y ni
+    bucle SE(3) ni residuo de profundidad activos. Fix doble: el driver espera
+    al primer frame CON depth para inicializar (examples/05), e invariante en
+    el tracker: puntos desde profundidad SOLO en mapa métrico. (c) ATRIBUCIÓN
+    (ablación con el MISMO driver, STEREO_BF=0): init métrica sola = 12.8 cm
+    con 244 perdidos y reloc — cae en la cuenca colapsada del episodio 200-340
+    (lección 28); con el residuo = **2.8 cm, 0 perdidos**: el anclaje métrico
+    por observación es lo que CRUZA el episodio, no una perilla. Resultado
+    final: **fr1_desk 2.8 cm (escala 1.005) y fr2_xyz 1.5 cm (escala 0.96,
+    antes 4.7) — criterio v0.6 (<5 cm métrico en ambas) CUMPLIDO**. Deuda
+    anotada: los adaptadores GTSAM (batch e iSAM2) proyectan con uv[:2] —
+    paridad monocular intacta, factor estéreo pendiente para --fast RGB-D.
+
+37. **La cámara derecha VIRTUAL de RGB-D se vuelve REAL sin tocar el BA**
+    (v0.6, estéreo EuRoC). El residuo estéreo del hito 2 estaba pensado para
+    esto: en RGB-D sintetizábamos u_R = u − bf/z desde un sensor de
+    profundidad; en estéreo, u_R se MIDE (u_R = u_L − d, el match en la imagen
+    derecha). Mismo residuo [u, v, u_R], misma ruta métrica del tracker — solo
+    cambia de dónde sale z. Piezas nuevas, todas en `vslam/io/dataset.py`:
+    (a) `EuRoCStereoRig` rectifica el par (cv2.stereoRectify desde los dos
+    sensor.yaml + la pose relativa cam0←cam1) → rectas epipolares = filas
+    (búsqueda 1D), cámara izquierda pinhole SIN distorsión, y bf = −P2[0,3]
+    (verificado en V1_01: baseline 11.01 cm, bf 48.0, los valores de EuRoC).
+    (b) `EuRoCStereoLoader` triangula profundidad densa por disparidad
+    (StereoSGBM) y la entrega con la MISMA firma `(ts, gray, depth)` que
+    TUMRGBDLoader → el tracker RGB-D métrico funciona sin cambios. La belleza
+    del truco: el ruido de la profundidad estéreo crece con z² (∂z/∂d = −bf/d²)
+    y el peso del residuo u_R decae con z² — se cancelan, igual que en RGB-D.
+    Resultado en **V1_01_easy (ESTÉREO, trayectoria final de KFs): 6.9 cm rmse,
+    escala similitud 1.002** (234 KFs, 27 bucles SE(3), 34 perdidos, 1 reloc) —
+    métrico de verdad SIN convención de gauge, sobre un dron rápido 6-DoF. El
+    ATE online es 63.8 cm (excursiones per-frame en el vuelo agresivo + coast);
+    la métrica del sistema es la final de KFs (lección 25). Tests sin el dataset
+    (~1.1 GB): tests/test_stereo.py — geometría del rig (bf = fx·b, rectificar
+    un par ya rectificado ≈ identidad) y profundidad por disparidad de un plano
+    fronto-paralelo (SGBM recupera d → Z). NOTA de datos: el host oficial de
+    EuRoC (robotics.ethz.ch) estaba caído; V1_01_easy se bajó del mirror ASL
+    `pepijn223/euroc-mirror` en HuggingFace (formato .zip idéntico).
+
+38. **El residuo de profundidad también en el stack RÁPIDO (GTSAM)** (v0.6,
+    cierre de la deuda). El residuo métrico vivía solo en la referencia NumPy;
+    los adaptadores GTSAM (batch e iSAM2) proyectaban con uv[:2] → bajo `--fast`
+    el BA local no anclaba la escala (solo el mapa nacía métrico y el GBA la
+    ataba al final). Portado con las piezas nativas de GTSAM: la profundidad es
+    un `GenericStereoFactor3D` sobre `Cal3_S2Stereo(baseline = bf/fx)`, con la
+    medición `StereoPoint2(u_L, u_R, v)` — el mismo residuo [u, v, u_R], ruido
+    3D + Huber, resuelto por el motor de C++. Las obs (2,) o con u_R = NaN caen
+    al factor monocular (mismo criterio que la referencia). En iSAM2 la
+    calibración estéreo se construye perezosamente al llegar el primer bf (el
+    tracker lo pasa por keyframe; es constante por secuencia). Test:
+    test_gtsam_stereo_factor_makes_scale_observable (el par nulo/observable —
+    con UNA cámara fija el BA 2D deja el 15% de escala, el estéreo lo recupera —
+    y ADEMÁS GTSAM ≡ NumPy). Validado en tiempo real (`--fast --depth`, ruta
+    iSAM2): **fr2_xyz 1.4 cm (escala 0.963) y fr1_desk 2.5 cm (escala 1.005)**,
+    0 perdidos — paridad con la referencia NumPy (1.5 / 2.8) a 30+ fps. La deuda
+    del §8 queda saldada para la ruta de rendimiento.
+
+39. **El mapa denso es "renderiza y compara" — y la referencia densa es
+    O(N·H·W)** (v0.7 hito 1-2, `GaussianSplattingMapper`). El SLAM geométrico ya
+    da la ESTRUCTURA (poses métricas + nube dispersa, v0.6); 3DGS solo la vuelve
+    foto-realista, sin tocar frontend ni backend (la tesis de docs/01 §3.2).
+    (a) RASTERIZADOR (gaussian_render.py, PyTorch puro, la referencia legible
+    como la NumPy del BA): proyección → covarianza 2D por EWA (Σ' = J·W·Σ·Wᵀ·Jᵀ)
+    → α-blending front-to-back por transmitancia (producto acumulado exclusivo).
+    Diferenciable de punta a punta; test por diferencias finitas del gradiente
+    respecto a la media + sobreajuste de una vista a PSNR > 30 dB. (b) MAPPER
+    (gaussian.py, detrás de MapperBase): `add_points` siembra gaussianas desde
+    la nube dispersa (media = punto, color = muestra de la imagen ancla),
+    `integrate_keyframe` guarda la vista (barato, no bloquea — contrato de
+    base.py), `optimize` hace descenso de gradiente contra los keyframes, y
+    `update_poses` re-ancla RÍGIDAMENTE cada submapa por el delta de su keyframe
+    (D = T'·T⁻¹: la media va con R_D·μ+t_D, la orientación de la covarianza rota
+    con R_D — la generalización densa del re-anclaje de la nube dispersa). Test:
+    multi-vista con geometría correcta + color desconocido → PSNR medio > 30 dB,
+    y update_poses rígido exacto. LÍMITE MEDIDO: el rasterizador denso guarda un
+    tensor (N, H, W, 2) → inviable a 640×480 con miles de gaussianas (OOM); el
+    ejemplo 07 renderiza a resolución reducida (`--scale`). La ruta full-res es
+    la gemela gsplat (tiles + CUDA), pendiente como lo fue el C++ del matching o
+    el GTSAM del BA (regla 3). Tests: test_gaussian_render.py (3),
+    test_gaussian_mapper.py (2).
+
+40. **gsplat NO enlaza en Windows (mangling nvcc↔MSVC) — y la vía corta es
+    DOCKER; de paso, la gemela destapó un bug de MEDIO PÍXEL en nuestra
+    referencia** (v0.7 hito 4). Tres verdades medidas en una tarde:
+    (a) EL MURO: los 30 kernels CUDA de gsplat COMPILAN en Windows (CUDA 12.4
+    por conda sin admin + VS Build Tools), pero el LINK falla con 38 LNK2019:
+    el frontend host de nvcc (cudafe++) y cl.exe divergen al comprimir las
+    back-references del mangling en plantillas de ~28 argumentos (mismo símbolo
+    legible, `...V34@000000@Z` vs `...V34@V12@33333@Z`). NO depende del toolset
+    (probado MSVC 14.44 y 14.39) ni de flags (/Zc:preprocessor arregló las
+    cabeceras CCCL pero no esto). En Linux/gcc ese mangling no existe: en el
+    contenedor (docker/Dockerfile.gsplat, imagen pytorch 2.6-cuda12.4-devel,
+    idea de Ariel) gsplat compila al primer import (88 s, cacheado en el volumen
+    gsplat-cache) y corre con la GPU (--gpus all, RTX 4070 visible). Además el
+    rasterizador POR TILES (gaussian_render_tiled.py, PyTorch puro, culling a
+    3.5σ + blending por tile con orden global) rompe el techo de MEMORIA de la
+    referencia (lección 39) manteniendo equivalencia >40 dB — pero NO el de
+    velocidad: 516 ms/iter con 15k gaussianas a 213×160, mientras gsplat da
+    ~15 ms/iter con 300k a 640×480. El kernel CUDA no es una optimización: es
+    la pieza HABILITANTE del mapa denso. (b) EL BUG que encontró el test de
+    equivalencia: daba 25 dB (esperado >45) con el error concentrado en el
+    NÚCLEO de las gaussianas, no en las colas del recorte. Con UNA gaussiana,
+    el pico de gsplat = exp(−0.5·0.5/σ²)·el nuestro en todo el barrido de
+    escalas — la firma exacta de MEDIO PÍXEL: nuestra referencia muestreaba la
+    rejilla en la esquina entera (i, j) y la convención estándar (3DGS, gsplat,
+    OpenGL) es el CENTRO (i+0.5, j+0.5). Fix de una línea (+0.5) en referencia
+    y tiled → 60 dB de equivalencia (max diff 0.009). La gemela rápida volvió a
+    auditar a la referencia legible, como GTSAM↔NumPy en el BA; queda
+    test_pixel_center_convention para cazar la regresión sin gsplat. Tests:
+    test_gaussian_tiled.py (3), test_gaussian_gsplat.py (4, corren en el
+    contenedor).
+
+41. **El techo del PSNR en datos reales es la CONSISTENCIA FOTOMÉTRICA, no la
+    capacidad del mapa — y el criterio de v0.7 se recalibró a paridad SOTA**
+    (v0.7 hito 4, fr1/desk 640×480, gsplat en Docker). La cadena de ablaciones,
+    cada hipótesis medida y las tres primeras FALSADAS:
+    | experimento | PSNR |
+    |---|---|
+    | 300k gaussianas full-res, siembra ingenua (escala fija 3 cm) | 15.5 dB |
+    | + escala por punto step·z/fx (la huella de la celda; mediana 0.4 cm) | 15.8 |
+    | + delta SE(3) POR KEYFRAME + ganancia/sesgo de exposición | 16.4 |
+    | + 30k iters con DECAY del lr de medias (×0.01, 3DGS original) | **20.9** |
+    | + densificación/poda (clone/split al 5% de mayor gradiente; 300k→493k) | 21.0 |
+    Conclusiones: (a) subir 20× las gaussianas y 4× la resolución NO movió el
+    número (15.0→15.5): la capacidad no era el cuello — dos veces medido (la
+    densificación tampoco: +0.1). (b) El factor dominante fue el PRESUPUESTO +
+    SCHEDULE de optimización (16.4→20.9): sin decay, el paso fijo de las medias
+    es un jitter perpetuo que se paga como blur. (c) El refinamiento de poses
+    es obligatorio en real: el ATE de ~cm del SLAM son PÍXELES a 1 m (1 cm ≈
+    5 px con fx≈520) y la fusión fotométrica exige sub-píxel — es el lazo de
+    MonoGS/SplaTAM: el mapa denso devuelve corrección a las poses (T' = T·exp(ξ),
+    ξ ∈ se(3), horneado en el keyframe al terminar). La exposición afín por
+    keyframe compensa el auto-exposure de TUM. (d) El RESIDUO es del dataset:
+    fr1/desk es handheld rápido con motion blur y rolling shutter — los propios
+    targets están emborronados distinto por vista. La dispersión por keyframe
+    (min 17.1 / mediana 20.9 / max 29.9) es el diagnóstico: en las vistas bien
+    condicionadas el mapa YA toca 30 dB. (e) CRITERIO RECALIBRADO (decisión de
+    Ariel con la literatura delante): los >30 dB de docs/04 son territorio de
+    datasets sintéticos (Replica); en fr1/desk lo publicado es Photo-SLAM ~21,
+    SplaTAM ~22, MonoGS RGB-D ~23-25. Criterio v0.7: **PSNR ≥ 21 dB en fr1/desk
+    (paridad SOTA) — CUMPLIDO: 21.0 dB** (12.5 de siembra), a 20 ms/iter con
+    ~500k gaussianas. Margen extra (SSIM, ponderar KFs por blur) documentado
+    como opcional, no bloqueante.
+
+42. **En Python el tercer hilo de ORB-SLAM es un PROCESO — el GIL convierte el
+    "hilo de mapeo denso" en un impuesto del 78% al tracking** (v0.7 hito 5,
+    examples/08, fr1/desk en el contenedor). `DenseMappingThread/Process`
+    (dense_thread.py): el tracking solo ENCOLA el keyframe (submit = una copia,
+    ~µs — test lo exige <5 ms) y el worker integra + siembra + optimiza por
+    CHUNKS con el presupuesto sobrante. La medición del criterio (ON vs OFF,
+    mismos 596 frames y 80 KFs en todos los casos):
+    | modo | mediana tracking | iters de mapa en vivo |
+    |---|---|---|
+    | sin mapper (baseline) | 36.1 ms | — |
+    | HILO | 64.2 ms (+78%) | 6800 |
+    | PROCESO | 46.6 ms (+29%) | 8400 |
+    | proceso + torch 1 core en el hijo | **45.0 ms (+25%)** | 8500 |
+    (a) El hilo NO sirve aunque el trabajo viva en la GPU: cada iter hace
+    cientos de llamadas Python→torch que retienen el GIL y el tracking
+    (Python+numpy) lo pierde la mitad del tiempo — ni set_num_threads(1) ni
+    dormir entre chunks lo arreglan (medido). El PROCESO (mp spawn, torch/CUDA
+    solo en el hijo, keyframes de ~77 KB por mp.Queue) recupera casi todo, y
+    además el mapa recibe MÁS presupuesto (8400 vs 6800 iters: el worker
+    tampoco es estrangulado). Es lo que hace MonoGS; base.py ya decía
+    "hilo/proceso". El +25% residual es contención de CPU/memoria del portátil
+    (driver CUDA, WSL2), no GIL. (b) CARRERA real cazada: update_poses desde el
+    driver muta los tensores del mapa en medio de un backward del worker →
+    acceso CUDA ilegal. Fix estructural: las correcciones de pose VIAJAN POR LA
+    COLA del worker (serializadas entre chunks) — sin locks largos, sin carrera
+    por construcción. (c) CRITERIO v0.7 (2ª mitad) CUMPLIDO: el tracking
+    procesa LOS MISMOS frames con el mapper ON (596/596, 80/80 KFs integrados,
+    0 fallos), con presupuesto medido: +9 ms de mediana. Tests:
+    test_dense_thread.py (3: submit barato, consumo+optimización, proxy de
+    poses; smoke del proceso). Ejemplo: examples/08_live_dense_mapping.py.
+
+43. **La cáscara ROS 2 no contamina — y la arquitectura de v0.7 mapea 1:1 a
+    nodos** (v0.8 hitos 1-4, contenedor vslam-ros). `vslam_msgs` (Keyframe con
+    imagen+depth+pose ÓPTICA+K escalada; PoseGraphEdge; TrackingState) +
+    `vslam_ros` con 4 nodos rclpy FINOS: dataset_node (TUM → cámara simulada,
+    imagen CRUDA + CameraInfo, como un driver real), frontend_node (arma el
+    PnPTracker desde la CameraInfo, publica odom + TF odom→base_link +
+    keyframes), backend_node (Path + TF map→odom) y mapper_node (keyframes →
+    nube retro-proyectada → PointCloud2). Claves: (a) la CONVERSIÓN DE EJES
+    óptico↔REP-103 vive SOLO en conversions.py y es por CONJUGACIÓN
+    (T_ros = R̃·T_opt·R̃⁻¹ — rotar un solo lado deja el mundo inconsistente y
+    RViz muestra la trayectoria "de lado"); el núcleo no importa ROS (regla 4
+    verificada). (b) El mapper-como-consumidor del hito 5 de v0.7 ES un nodo:
+    el tópico sustituye a la mp.Queue y la lección 42 (proceso, no hilo) viene
+    de serie — cada nodo ROS es un proceso. (c) backend_node materializa
+    REP-105: T_map_odom = T_map_kf·T_odom_kf⁻¹, la corrección a saltos; el
+    control consume odom (suave), la navegación map (consistente). MEDIDO
+    (test/smoke_pipeline.py, 35 s a 10 Hz): 148 odom, keyframes→Path(3) +
+    PointCloud2 (4901 pts), árbol TF map→odom→base_link completo, metric=True.
+    RViz vía WSLg (Docker Desktop: mounts /run/desktop/mnt/host/wslg +
+    LIBGL_ALWAYS_SOFTWARE=1) confirmado visualmente — CRITERIO de v0.8
+    cumplido. Gotcha de bash que costó una hora: `source X && cmd &` pone en
+    background LA LISTA ENTERA (el shell nunca sourceó el overlay y el CLI
+    decía "message type invalid" — parecía un bug de typesupport y era un `;`).
+    Restante v0.8: lifecycle nodes, demo con rosbag de EuRoC, webcam.
+
+44. **Lifecycle: los CONSUMIDORES se activan antes que el productor — y EuRoC
+    entra por la misma puerta que TUM** (v0.8 hitos 5-6). Los tres nodos vslam
+    son LifecycleNode (configure arma pub/sub, activate/deactivate PAUSAN el
+    procesamiento con los drivers vivos, cleanup destruye el tracker → el
+    siguiente ciclo es un SLAM nuevo); verificado: deactivate → 0 msgs de
+    odom, activate → vuelve a fluir. La LECCIÓN del bringup: activarlos en
+    orden frontend→backend→mapper pierde los primeros keyframes (medido:
+    map=0, path=1 — el QoS reliable protege el TRANSPORTE, no al suscriptor
+    tardío); el orden correcto es consumidores→productor (mapper, backend,
+    frontend) — smoke verde: 18 nubes/9958 pts, Path completo. EuRoC estéreo:
+    dataset_node con param `dataset:=euroc` reutiliza EuRoCStereoLoader (misma
+    firma que RGB-D, lección 37); el bf del rig NO viaja en CameraInfo → va
+    por parámetro al frontend (euroc_demo.launch). Smoke EuRoC: metric=True,
+    bf=48.02, 9 KFs→Path, 41k puntos. WEBCAM (pendiente, decisión anotada):
+    Docker Desktop/Windows no expone /dev/video0 — requiere usbipd-win para
+    adjuntar la cámara USB a WSL2; además el frontend hoy exige depth
+    sincronizada (la webcam sería MONOCULAR: rama gray-only del tracker).
+
+45. **Config declarativa sin duplicar la verdad + reset de mapa — y el frame
+    CIEGO que nunca habíamos visto** (v0.9 hitos 1-2). (a) CONFIG
+    (vslam/config.py): las constantes de clase SIGUEN siendo la documentación
+    (cada umbral con su porqué medido); el YAML/JSON solo las sobreescribe POR
+    INSTANCIA al final del __init__ (`PnPTracker(..., config=load_config(p))`).
+    Config vacía = bit-idéntico (garantía de no-regresión); un typo falla en
+    el ARRANQUE listando las claves válidas; la plantilla se GENERA desde las
+    clases (`python -m vslam.config`, 45 perillas: tracker+isam2+pose_graph) —
+    una sola fuente de verdad, sin YAML que envejece. Tests: test_config (5).
+    (b) DEGRADACIÓN ELEGANTE: tras LOST_RESET_AFTER=90 frames en coast sin
+    reloc, el mapa es irrecuperable → `_reset_map()` archiva la trayectoria
+    (keyframe_trajectory devuelve archivadas+actual, en orden), vacía TODO
+    (mapper, BoW, iSAM2, init) y la siguiente vista re-inicializa una sesión
+    NUEVA anclada en la pose extrapolada — el init RGB-D ahora ancla en
+    self.T_w_c (= I en el arranque: bit-idéntico; = pose coasted tras reset:
+    continuidad sin salto). Las sesiones NO se fusionan (multi-mapa/Atlas
+    fuera de 1.0, docs/04). (c) El test del APAGÓN (frames negros) cazó un bug
+    real preexistente: `_guided_match` con CERO keypoints crashea (np.array de
+    lista vacía es (0,) y no broadcastea contra (2,)) — nunca visto porque TUM
+    siempre tiene esquinas; una oclusión total en un robot real habría tirado
+    el tracker. Fix: retorno temprano. REGRESIÓN verificada tras tocar init y
+    matching: fr1_desk --depth 2.8 cm rmse / escala 1.005 / 81 KFs / 0
+    perdidos — los números EXACTOS de referencia. Tests: test_map_reset (1),
+    test_rgbd (5) verdes.
+
+46. **La concurrencia se audita con ÉPOCAS — y la API se congela pequeña**
+    (v0.9 hitos 3-5). (a) El test de estrés (test_concurrency: async_mapping +
+    lectores en caliente estilo nodo ROS + apagón con reset en pleno vuelo)
+    cazó la última carrera: un job del worker de mapeo puede pertenecer a una
+    SESIÓN MUERTA (reset de la lección 45). Fix estructural: época de mapa —
+    `_map_epoch` viaja con cada job; el worker DESCARTA jobs de épocas viejas
+    y una excepción con la época cambiada a mitad del job es la muerte
+    esperada de la sesión, no un fallo (map_failures ya no la cuenta). El
+    mismo patrón del epoch-check de los sistemas de colas. (b) docs/06 (mapa
+    denso 3DGS): la visita guiada de las lecciones 39-42 con la cadena de
+    ablaciones y los comandos; el "docs/05 (RGB-D)" de la hoja de ruta quedó
+    cubierto por las lecciones 35-38 de ESTE documento (la numeración de docs
+    derivó: 05 es el traspaso). (c) API FREEZE (vslam/__init__.py, v0.9.0):
+    16 nombres públicos en __all__ — contratos (PinholeCamera/Frame/
+    Trajectory), el tracker y sus factories, MapperBase/SparsePointMapper,
+    loaders y config. Los pesados (torch/gtsam) quedan FUERA del import raíz
+    (perezosos, se importan de sus módulos): `import vslam` no arrastra GPU ni
+    C++ — verificado. Lo no listado puede cambiar entre minors.
 
 ---
 
@@ -567,14 +1027,146 @@ Resumen operativo de lo inmediato:
     fr3_long 78.5 / 0      fr1_room 13.8/988    fr1_desk 2.2 / 560   ← límites (lección 28)
     ```
     4/6 trackean sin perderse (las 3 buenas + fr3, que trackea pero deriva); las
-    fr1 handheld se pierden. Para cumplir "6 SIN PERDERSE" con calidad falta:
-    frontend más robusto (fr1) y resolver fr3 (calibración/deriva) — o añadir
-    secuencias más amables (EuRoC cuando vuelva el host, o fr1_desk2/fr2_360).
-- **v0.5 — C++** (perfilar primero), **v0.6 — RGB-D**, **v0.7 — 3DGS mapper**,
-  **v0.8 — ROS 2**, **v0.9 — endurecimiento**, **v1.0**.
-  - Infraestructura ya lista para v0.6/v0.8: contenedor `docker/` con ROS 2 +
-    el núcleo Python (ver §2 y `docker/README.md`). Los wrappers previstos
-    (`vslam_ros`, `vslam_msgs`, TF REP-105) están diseñados en `ros2/README.md`.
+    fr1 handheld se pierden con ORB. **Con SuperPoint+LightGlue fr1_desk pasa de
+    560 a 140 perdidos (lección 29)** — el frontend aprendido es la vía para las
+    fr1. El residual (140) es un episodio estructural, NO umbrales (medido).
+    Falta: re-correr el benchmark completo con learned; resolver fr3 (calibración/
+    deriva); EuRoC cuando vuelva el host; para el residual de fr1, KLT/IMU.
+- **v0.5 — Tiempo real (EN PROGRESO)**. Criterio: 30 fps a 640×480, mismo ATE
+  ±5%. HECHO:
+  - ✅ **PERFILADO** (regla de oro): fr2_desk/ORB da **4.3 fps** (232 ms/frame).
+    Reparto — BA local **57%** (pico 2 s/KF síncrono), matching guiado **37%**
+    (frames TRACK 93 ms), cv2 (ORB/match/PnP) solo **8%**. Refuta la conjetura de
+    docs/04 (los candidatos eran extracción/matching/PnP): lo caro es el BA y el
+    guiado, código Python/NumPy — NO cv2, que ya es C. [lección 30]
+  - ✅ **Adaptador GTSAM del BA** (`vslam/backend/gtsam_ba.py`, `ba_backend="gtsam"`
+    en el tracker): mismo problema que la referencia NumPy, test de equivalencia
+    (`tests/test_gtsam_ba.py`). Medido en fr2_desk: KF-frame **1382→385 ms**
+    (BA 3.6×), pico 3356→614, fps **5.8→9.5**, ATE equivalente (~1-2 cm).
+  - ✅ **Matching guiado en C++** (`cpp/src/guided_match.cpp` → módulo pybind11
+    `vslam_cpp`, lección 31): equivalencia exacta con la referencia Python
+    (tests/test_guided_match_cpp.py). Frames TRACK **110→29 ms** (bajo los 33 ms
+    de 30 fps); fps global **18.7** (4.3 al inicio de v0.5). Toolchain Windows:
+    VS Build Tools 2022 + pybind11/cmake del env (comando en cpp/CMakeLists.txt).
+  - ✅ **BA incremental iSAM2** (`ba_backend="isam2"`, `gtsam_isam2.py`, lección
+    32): corredor KF 2060→82 ms (25×), 49 fps; fr2_desk paridad ATE (1.5 cm),
+    0 fallos. Test formal: tests/test_isam2_ba.py (incl. reset/re-siembra).
+  - ✅ **HILO DE MAPEO** (`async_mapping=True`, lección 33): bucle+BA+culling en
+    worker; correcciones al tracking vía delta pendiente. fr2_desk: **p99
+    400→126 ms, max 677→197 ms**, paridad ATE, 0 fallos. GIL release en vslam_cpp.
+    Test: tests/test_async_mapping.py.
+  - ✅ **BoW para el reconocimiento de lugar** (place_recognition.py, lección
+    34): vocabulario en sesión (k-medias Hamming, voto de mayoría) + índice
+    invertido + tf·idf. Query 2.7 ms; solo top-5 pagan verificación. fr2_desk:
+    **46.7 fps, mediana 17 ms, p99 73 ms, ATE-KF 1.4 cm**.
+  - ✅ **CRITERIO DE v0.5 CUMPLIDO en fr2_desk** (640×480, CPU): 30 fps pedidos,
+    **46.7 medidos** (stack: guiado C++ + isam2 + hilo de mapeo + BoW; el stack
+    rápido es opt-in: `ba_backend="isam2", async_mapping=True`; la referencia
+    didáctica NumPy sigue siendo el default). ATE en paridad (±ruido RANSAC).
+  **v0.5 CERRADA** (julio 2026, decisión de Ariel). Deuda menor trasladada a §8:
+  validar --fast en las demás secuencias TUM; GTSAMBackend del grafo de poses.
+- **v0.6 — RGB-D y estéreo (EN PROGRESO)**. Criterio (docs/04): TUM fr1_desk y
+  fr2_xyz con **ATE < 5 cm MÉTRICO** (metros de verdad: alineación rígida SIN
+  escala, o escala Umeyama ≈ 1.0). Estado del primer hito (todo MEDIDO):
+  - ✅ Profundidad en `TUMRGBDLoader` (`with_depth=True`; depth.txt asociado
+    por timestamp, PNG 16 bits, factor 1/5000 → metros; 0 = sin dato).
+  - ✅ INIT RGB-D instantánea (`_initialize_rgbd`): retro-proyección métrica
+    desde el frame 0 (sin danza de 2 vistas, sin gauge mediana=1); enciende
+    `_metric`. Puntos de KF desde profundidad (nacen con 1 obs — BA los
+    excluye hasta la 2ª; el buffer de iSAM2 ya lo manejaba por diseño).
+  - ✅ Evaluación métrica: `ate(..., with_scale=False)` (Umeyama rígido) +
+    escala de similitud como chequeo (≈1.00 = mapa de verdad en metros).
+    `examples/05 --depth`. Rectificación de profundidad con INTER_NEAREST
+    (interpolar profundidad a través de una discontinuidad inventa valores).
+  - ✅ Bucle MÉTRICO en SE(3) (lección 35 — la lección grande del hito):
+    Sim(3) re-escalaba el mapa métrico y componía el error (fr2_xyz 22 cm,
+    escala 2.09). Con el fix: **fr2_xyz 4.7 cm MÉTRICO (escala 1.036) —
+    criterio CUMPLIDO**; sin bucles 1.1 cm (techo de la secuencia).
+  - ✅ HITO 2 — residuos de PROFUNDIDAD en el BA (lección 36): estéreo
+    virtual u_R = u − bf/z (`STEREO_BF = 40`), residuo [u, v, u_R] en la
+    referencia NumPy (BA local + GBA cuando `_metric`); observaciones (3,)
+    en el mapper (el almacén no interpreta). De camino cayó el bug RAÍZ de
+    fr1_desk: depth arranca tarde → init monocular → mapa MIXTO gauge/metros
+    (`_metric=False`, escala 1.008 de casualidad) — fix: driver espera depth
+    + invariante "puntos desde profundidad SOLO en mapa métrico".
+    **CRITERIO v0.6 CUMPLIDO: fr1_desk 2.8 cm (escala 1.005, 0 perdidos) y
+    fr2_xyz 1.5 cm (escala 0.96, antes 4.7)**. Ablación sin residuo: fr1
+    12.8 cm/244 perdidos — el residuo cruza el episodio biestable 200-340.
+    Levers refutados en su momento (contexto pre-fix, mapa mixto):
+    SuperPoint+LightGlue (7.9 cm), DEPTH_MAX 8→4, GBA 50→100.
+  - ✅ HITO 3 — ESTÉREO REAL (EuRoC, lección 37): `EuRoCStereoRig`
+    (rectificación + bf) + `EuRoCStereoLoader` (disparidad SGBM → profundidad,
+    misma firma RGB-D) + `examples/06 --stereo`. La cámara derecha VIRTUAL de
+    RGB-D se vuelve REAL: u_R medido en vez de sintetizado, mismo residuo del
+    BA. **V1_01_easy: 6.9 cm métrico, escala 1.002** (final de KFs, 234 KFs, 27
+    bucles). Tests sin el dataset: tests/test_stereo.py (2).
+  - ✅ FACTOR ESTÉREO EN GTSAM (lección 38): batch e iSAM2 usan
+    `GenericStereoFactor3D`/`Cal3_S2Stereo` cuando llega u_R. `--fast --depth`
+    en paridad con NumPy (fr2_xyz 1.4, fr1_desk 2.5 cm) a tiempo real.
+  - ⏳ Restante de v0.6: más secuencias EuRoC (MH_*, V2_*) para medir el techo
+    del enfoque; --fast sobre estéreo EuRoC (example 06 aún no expone --fast).
+- **v0.7 — MAPA DENSO 3DGS** (EN PROGRESO — la etapa de la tesis, docs/01 §3.2):
+  - ✅ HITO 1: rasterizador 3DGS diferenciable (`gaussian_render.py`, PyTorch
+    puro): proyección + covarianza EWA + α-blending por transmitancia. Tests:
+    proyección, gradiente por diferencias finitas, sobreajuste de vista >30 dB.
+  - ✅ HITO 2: `GaussianSplattingMapper` detrás de MapperBase (`gaussian.py`):
+    siembra desde la nube dispersa, `optimize` (renderiza y compara),
+    `update_poses` rígido por submapa. Test multi-vista >30 dB + rigidez exacta.
+  - ✅ HITO 3: medición REAL en fr1/desk (ejemplo 07, siembra densa por
+    profundidad): 15.0 dB a 160×120 — el techo de la referencia densa (memoria)
+    y de PyTorch puro (velocidad: tiled da 516 ms/iter con 15k gaussianas).
+  - ✅ HITO 4 — gemela rápida y CRITERIO (lecciones 40-41): rasterizador POR
+    TILES (equivalencia >40 dB, rompe la memoria) + **gsplat en DOCKER**
+    (docker/Dockerfile.gsplat; en Windows nativo el link es imposible por el
+    mangling nvcc↔MSVC). El test de equivalencia destapó el bug del MEDIO PÍXEL
+    (+0.5, 25→60 dB). Cadena fotométrica completa (escala por punto, delta
+    SE(3)+exposición por KF, 30k iters con decay, densificación/poda):
+    **21.0 dB en fr1/desk full-res** a 20 ms/iter con ~500k gaussianas.
+    Criterio recalibrado a PARIDAD SOTA (≥21 dB; el >30 de docs/04 es de
+    dataset sintético) — **CUMPLIDO al filo**. Comando de referencia:
+    `docker run --rm --gpus all -v <repo>:/workspace -v gsplat-cache:/root/.cache/torch_extensions
+    vslam-gsplat python -u examples/07_gaussian_mapping.py --root data/tum/rgbd_dataset_freiburg1_desk
+    --backend gsplat --scale 1 --max-points 300000 --iters 30000 --refine-poses
+    --exposure --densify-every 500` → 21.0 dB (por KF: 17.1/20.9/29.9).
+  - ✅ HITO 5 — integración EN VIVO (lección 42): `DenseMappingProcess`
+    (dense_thread.py) — el mapper denso corre en PROCESO propio (el GIL hace
+    inviable el hilo: +78% de latencia al tracking; el proceso la deja en
+    +25% con MÁS presupuesto de mapa) y las correcciones de pose viajan por
+    la cola del worker (carrera CUDA real cazada y eliminada). Criterio
+    (2ª mitad) CUMPLIDO: mismos 596/596 frames con mapper ON, 80/80 KFs,
+    0 fallos (examples/08, tabla en la lección 42).
+  - **v0.7 COMPLETA** (pendiente de commit). Opcional no bloqueante: margen de
+    PSNR (SSIM, ponderar KFs por blur), color RGB (el pipeline va en gris),
+    Replica para el criterio >30 dB sintético.
+- **v0.8 — ROS 2** (EN PROGRESO — criterio principal CUMPLIDO, lección 43):
+  - ✅ HITOS 1-4: `vslam_msgs` + `vslam_ros` (4 nodos rclpy finos) compilan y
+    corren en el contenedor; smoke headless completo (test/smoke_pipeline.py);
+    **demo RViz vía WSLg confirmada** (trayectoria + nube + TF REP-105) sin
+    tocar el núcleo. Comandos: `colcon build` en /workspace/ros2 y
+    `ros2 launch vslam_ros tum_demo.launch.py rate:=10.0 rviz:=true`.
+  - ✅ HITOS 5-6 (lección 44): los 3 nodos vslam son LIFECYCLE (pausa/reanuda
+    verificado; bringup consumidores→productor) y `dataset:=euroc` corre el
+    estéreo real por ROS (bf por parámetro; smoke: metric=True, 41k pts).
+  - ⏳ Restante: webcam/RealSense (requiere usbipd-win + rama monocular del
+    frontend — decisión anotada en lección 44); rosbag nativo (`ros2 bag
+    record/play` de nuestros tópicos funciona out-of-the-box si se quiere).
+- **v0.9 — ENDURECIMIENTO** (EN PROGRESO, lección 45):
+  - ✅ HITO 1 — config declarativa: vslam/config.py (sobrescritura por
+    instancia, typo falla en arranque, plantilla generada de las clases con
+    `python -m vslam.config`), `--config` en examples/05. Tests: 5.
+  - ✅ HITO 2 — degradación elegante: LOST_RESET_AFTER=90 → _reset_map()
+    (archiva trayectoria, sesión nueva anclada en la pose extrapolada) + fix
+    del frame CIEGO en _guided_match. Regresión fr1_desk intacta (2.8 cm).
+  - ✅ HITO 3 — concurrencia (lección 46): test de estrés (async_mapping +
+    lectores en caliente + reset en vuelo) + fix de ÉPOCAS de mapa en el
+    worker. ✅ HITO 4 — docs/06 (3DGS, visita guiada de lecciones 39-42).
+    ✅ HITO 5 — API freeze: vslam/__init__.py v0.9.0, 16 nombres públicos,
+    import raíz sin torch/gtsam (verificado).
+  - ✅ LICENCIA: **MIT** (decisión de Ariel; GTSAM es BSD-3 y todas las deps
+    son permisivas — solo se importan, no imponen nada). LICENSE en la raíz;
+    package.xml/setup.py de ROS actualizados. **v0.9 COMPLETA.**
+- **v1.0**: PyPI, semver, LICENSE, CONTRIBUTING, tabla de benchmarks en el
+  README, video demo.
 
 ---
 
@@ -590,9 +1182,10 @@ Resumen operativo de lo inmediato:
 | Frame.timestamp = 0.0 en los KFs internos | Propagar cuando importe (datasets reales) |
 | Umbrales calibrados solo en sintético | v0.45: piso de salud de KF ya es perilla (lección 21). Resto pendiente por-dataset |
 | Robustez de recorrido largo en real | fr2_xyz 35 / fr2_desk ~105 cm: KFs adaptativos + matching guiado + bucle a escala de sesión (lecciones 21-23). Sub-hito de v0.45 |
-| learned.py (SuperPoint/DISK/LightGlue) | VERIFICADO en GPU (v0.4b): SuperPoint+LightGlue corren en la RTX 4070 (env `vslam`). Falta integrarlo/benchmark en secuencias |
+| learned.py (SuperPoint/DISK/LightGlue) | v0.45: VERIFICADO en GPU + INTEGRADO (LightGlue 2D-2D vía `self.matcher`, `_desc_matcher` para 3D-2D). Rescata fr1_desk (560→140 perdidos, lección 29). Recalibrar umbrales MEDIDO como NO-lever (inliers p10=91 ≫ 45); el residual es estructural. Pendiente: benchmark completo con learned |
 | Números del benchmark en README pre-BA | Re-correr y refrescar al tocar el benchmark |
 | Modo --no-ba del corredor colapsa (~200 cm) | Conocido; no es objetivo |
+| ~~Adaptadores GTSAM sin residuo de profundidad~~ SALDADA (v0.6, lección 38) | gtsam_ba y gtsam_isam2 usan `GenericStereoFactor3D` + `Cal3_S2Stereo` cuando llega u_R. `--fast --depth` validado: fr2_xyz 1.4 / fr1_desk 2.5 cm, paridad con NumPy |
 | examples/01 y tracker comparten conceptos duplicados | Deliberado (didáctica); no unificar |
 | Licencia sin decidir | Preguntar a Ariel en el commit |
 
