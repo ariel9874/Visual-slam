@@ -1,15 +1,22 @@
-"""dataset_node: re-publica un dataset TUM RGB-D como si fuera una cámara.
+"""dataset_node: re-publica un dataset (TUM RGB-D o EuRoC estéreo) como cámara.
 
 El sustituto del driver de cámara para las demos sin hardware: lee el dataset
-del disco (el MISMO loader del núcleo, vslam/io/dataset.py) y publica
+del disco (los MISMOS loaders del núcleo, vslam/io/dataset.py) y publica
 
-    /camera/image_raw          sensor_msgs/Image (mono8, SIN rectificar)
-    /camera/depth/image_raw    sensor_msgs/Image (32FC1, metros; se omite si no hay)
+    /camera/image_raw          sensor_msgs/Image (mono8)
+    /camera/depth/image_raw    sensor_msgs/Image (32FC1, metros)
     /camera/camera_info        sensor_msgs/CameraInfo (K + distorsión)
 
-a la cadencia pedida. La imagen va CRUDA a propósito: quitar la distorsión es
-trabajo del consumidor (frontend_node) con la CameraInfo — igual que con un
-driver real. QoS sensor-data (best effort): un frame perdido no es un error.
+a la cadencia pedida. Dos personalidades (param `dataset`):
+  - `tum`: imagen CRUDA + distorsión en la CameraInfo — quitarla es trabajo
+    del consumidor (frontend_node), igual que con un driver real.
+  - `euroc`: par estéreo RECTIFICADO por el rig del núcleo (EuRoCStereoRig) y
+    profundidad de SGBM (EuRoCStereoLoader) — la MISMA firma (ts, gray, depth)
+    que RGB-D (lección 37). La CameraInfo va sin distorsión (ya rectificada);
+    el bf del rig NO viaja en CameraInfo: lo fija el launch en el frontend
+    (param stereo_bf).
+
+QoS sensor-data (best effort): un frame perdido no es un error.
 """
 
 from __future__ import annotations
@@ -25,7 +32,8 @@ from sensor_msgs.msg import CameraInfo, Image
 
 sys.path.insert(0, "/workspace")             # el repo montado en el contenedor
 
-from vslam.io.dataset import TUMRGBDLoader, tum_camera  # noqa: E402
+from vslam.io.dataset import (EuRoCStereoLoader, TUMRGBDLoader,  # noqa: E402
+                              tum_camera)
 
 
 def _to_image_msg(arr: np.ndarray, stamp, frame_id: str, encoding: str) -> Image:
@@ -46,11 +54,20 @@ class DatasetNode(Node):
         self.declare_parameter("root", "")
         self.declare_parameter("rate", 30.0)
         self.declare_parameter("loop", False)
+        self.declare_parameter("dataset", "tum")     # tum | euroc
         root = Path(self.get_parameter("root").value)
         if not root.exists():
             raise SystemExit(f"dataset no encontrado: {root} (param 'root')")
-        self.camera = tum_camera(root.name)
-        self._loader = TUMRGBDLoader(root, with_depth=True)
+        kind = str(self.get_parameter("dataset").value)
+        if kind == "euroc":
+            self._loader = EuRoCStereoLoader(root)
+            self.camera = self._loader.camera        # izquierda RECTIFICADA
+            self.get_logger().info(
+                f"EuRoC estéreo: bf={self._loader.stereo_bf:.2f} "
+                "(pasarlo al frontend como stereo_bf)")
+        else:
+            self.camera = tum_camera(root.name)
+            self._loader = TUMRGBDLoader(root, with_depth=True)
         self._it = iter(self._loader)
         self._loop = bool(self.get_parameter("loop").value)
 

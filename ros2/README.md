@@ -32,7 +32,15 @@ tipos custom). Usar `source setup.bash; ros2 launch ... &`.
 | `PoseGraphEdge.msg` | ids, transformación relativa, matriz de información | factores de `vslam/backend` |
 | `TrackingState.msg` | nº de inliers, estado (OK/COASTING/LOST) | diagnóstico del frontend |
 
-### `vslam_ros` — cuatro nodos (lifecycle: pendiente de promoción)
+### `vslam_ros` — cuatro nodos (frontend/backend/mapper son LIFECYCLE)
+
+Los tres nodos vslam nacen `unconfigured`; el launch los lleva a activo en
+orden **consumidores → productor** (mapper, backend, frontend — al revés se
+pierden los primeros keyframes; lección 44). Pausa/reanudación en caliente:
+`ros2 lifecycle set /vslam_frontend deactivate` (los drivers siguen; el SLAM
+ignora frames) y `activate` para reanudar; `cleanup` destruye el tracker.
+Demo EuRoC estéreo: `ros2 launch vslam_ros euroc_demo.launch.py` (bf del rig
+por parámetro — no viaja en CameraInfo).
 | Nodo | Suscribe | Publica | Frecuencia |
 |---|---|---|---|
 | `dataset_node` | — (lee TUM del disco) | `/camera/image_raw` (CRUDA), `/camera/depth/image_raw`, `/camera/camera_info` | param `rate` |

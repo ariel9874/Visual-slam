@@ -23,7 +23,7 @@ import sys
 
 import numpy as np
 import rclpy
-from rclpy.node import Node
+from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
 from sensor_msgs.msg import PointCloud2, PointField
 
 sys.path.insert(0, "/workspace")
@@ -52,21 +52,39 @@ def _cloud_msg(points: np.ndarray, intens: np.ndarray, stamp,
     return m
 
 
-class MapperNode(Node):
+class MapperNode(LifecycleNode):
     def __init__(self) -> None:
         super().__init__("vslam_mapper")
         self.declare_parameter("map_period", 2.0)
         self.declare_parameter("seed_step", 6)
-
+        self._active = False
         self._points: list = []          # nube acumulada: [(xyz, gris)]
+
+    def on_configure(self, state) -> TransitionCallbackReturn:
         self.create_subscription(Keyframe, "/vslam/keyframes",
                                  self._on_keyframe, 50)
-        self.pub_map = self.create_publisher(PointCloud2, "/vslam/map", 1)
+        self.pub_map = self.create_lifecycle_publisher(PointCloud2,
+                                                       "/vslam/map", 1)
         self.create_timer(float(self.get_parameter("map_period").value),
                           self._publish_map)
-        self.get_logger().info("esperando keyframes...")
+        self.get_logger().info("configurado: esperando keyframes")
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_activate(self, state) -> TransitionCallbackReturn:
+        self._active = True
+        return super().on_activate(state)
+
+    def on_deactivate(self, state) -> TransitionCallbackReturn:
+        self._active = False
+        return super().on_deactivate(state)
+
+    def on_cleanup(self, state) -> TransitionCallbackReturn:
+        self._points.clear()
+        return TransitionCallbackReturn.SUCCESS
 
     def _on_keyframe(self, kf: Keyframe) -> None:
+        if not self._active:
+            return
         h, w = kf.image.height, kf.image.width
         if h == 0 or kf.depth.height == 0:
             return
@@ -102,6 +120,8 @@ class MapperNode(Node):
         pts_ros = (R_BO @ pts.T).T.astype(np.float32)
         self.pub_map.publish(_cloud_msg(pts_ros, intens,
                                         self.get_clock().now().to_msg(), "map"))
+        self.get_logger().info(f"mapa publicado: {len(pts_ros)} puntos",
+                               throttle_duration_sec=5.0)
 
 
 def main() -> None:

@@ -1,8 +1,11 @@
-"""Demo TUM RGB-D: los 4 nodos (dataset + frontend + backend + mapper).
+"""Demo EuRoC ESTÉREO: el mismo pipeline con la otra personalidad del dataset.
 
-    ros2 launch vslam_ros tum_demo.launch.py \
-        root:=/workspace/data/tum/rgbd_dataset_freiburg1_desk rate:=15.0 \
-        rviz:=true      # criterio de v0.8 (necesita WSLg, docker/README.md)
+    ros2 launch vslam_ros euroc_demo.launch.py \
+        root:=/workspace/data/euroc/V1_01_easy rate:=10.0 rviz:=true
+
+El dataset_node publica el par rectificado + profundidad SGBM (lección 37);
+el frontend recibe stereo_bf/depth_max por parámetro (el bf del rig no viaja
+en CameraInfo). bf=48.02 y depth_max=40 son los del rig V1 (docs/05 §3).
 """
 
 from launch import LaunchDescription
@@ -11,13 +14,7 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-# Los nodos vslam son LIFECYCLE (ros2/README): nacen unconfigured y hay que
-# llevarlos a activo. En un robot lo haría un manager (estilo nav2); en la demo
-# lo hace este proceso — visible y didáctico (es el mismo CLI que usarías tú).
-# ORDEN: consumidores (mapper, backend) ANTES que el productor (frontend) — el
-# QoS reliable protege el transporte, no al suscriptor tardío: si el frontend
-# se activa primero, los primeros keyframes se publican sin nadie escuchando
-# (carrera medida en el smoke: map=0, path=1).
+# Consumidores antes que el productor (ver tum_demo.launch.py).
 _LIFECYCLE_UP = ExecuteProcess(
     cmd=["bash", "-c",
          "sleep 4; for n in vslam_mapper vslam_backend vslam_frontend; do "
@@ -28,17 +25,20 @@ _LIFECYCLE_UP = ExecuteProcess(
 
 def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
-        DeclareLaunchArgument(
-            "root",
-            default_value="/workspace/data/tum/rgbd_dataset_freiburg1_desk"),
-        DeclareLaunchArgument("rate", default_value="15.0"),
+        DeclareLaunchArgument("root",
+                              default_value="/workspace/data/euroc/V1_01_easy"),
+        DeclareLaunchArgument("rate", default_value="10.0"),
         DeclareLaunchArgument("rviz", default_value="false"),
+        DeclareLaunchArgument("stereo_bf", default_value="48.02"),
         Node(package="vslam_ros", executable="dataset_node",
              name="vslam_dataset", output="screen",
              parameters=[{"root": LaunchConfiguration("root"),
-                          "rate": LaunchConfiguration("rate")}]),
+                          "rate": LaunchConfiguration("rate"),
+                          "dataset": "euroc"}]),
         Node(package="vslam_ros", executable="frontend_node",
-             name="vslam_frontend", output="screen"),
+             name="vslam_frontend", output="screen",
+             parameters=[{"stereo_bf": LaunchConfiguration("stereo_bf"),
+                          "depth_max": 40.0}]),
         Node(package="vslam_ros", executable="backend_node",
              name="vslam_backend", output="screen"),
         Node(package="vslam_ros", executable="mapper_node",

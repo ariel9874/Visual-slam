@@ -1,4 +1,4 @@
-"""frontend_node: el tracker del núcleo detrás de tópicos ROS.
+"""frontend_node: el tracker del núcleo detrás de tópicos ROS (LifecycleNode).
 
 Cáscara FINA (regla 4): este nodo no sabe de SLAM — construye el `PnPTracker`
 del núcleo con la CameraInfo que llega, le pasa frames y traduce sus salidas:
@@ -9,14 +9,21 @@ del núcleo con la CameraInfo que llega, le pasa frames y traduce sus salidas:
               TF odom → base_link    (continuo y suave — REP-105)
               /vslam/tracking_state  vslam_msgs/TrackingState (diagnóstico)
               /vslam/keyframes       vslam_msgs/Keyframe (imagen+depth+pose
-                                     ópticos, para mapper/backend)
+                                     ópticos + K, para mapper/backend)
 
-La imagen llega CRUDA (como de un driver real): aquí se rectifica con la
-CameraInfo, igual que hacen los ejemplos con el loader. La conversión de ejes
-óptico→REP-103 pasa SOLO por conversions.py, nunca por el núcleo.
+LIFECYCLE (ros2/README.md): en un robot real el SLAM debe poder reiniciarse
+sin tocar los drivers de cámara. `configure` arma las suscripciones (el tracker
+nace perezoso de la CameraInfo), `activate/deactivate` PAUSAN el procesamiento
+(los frames del driver siguen llegando y se ignoran), `cleanup` DESTRUYE el
+tracker (la siguiente configure+activate arranca un SLAM nuevo).
 
-TODO(v0.8 hito 4): promover a LifecycleNode (configurar/activar/desactivar
-limpiamente, ros2/README.md) — la lógica no cambia, solo el andamiaje.
+    ros2 lifecycle set /vslam_frontend configure && ... activate
+
+Parámetros: `kf_scale` (reducción de la imagen del Keyframe), `features`
+(orb/superpoint), `stereo_bf` y `depth_max` (para EuRoC estéreo: el bf del rig
+rectificado no viaja en CameraInfo — lo fija el launch, ver euroc_demo).
+
+La conversión de ejes óptico→REP-103 pasa SOLO por conversions.py.
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ import numpy as np
 import rclpy
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from nav_msgs.msg import Odometry
-from rclpy.node import Node
+from rclpy.lifecycle import LifecycleNode, TransitionCallbackReturn
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from geometry_msgs.msg import TransformStamped
@@ -41,22 +48,29 @@ from vslam_ros.conversions import (T_to_pose, T_to_transform,     # noqa: E402
                                    optical_to_rep103)
 
 
-class FrontendNode(Node):
+class FrontendNode(LifecycleNode):
     def __init__(self) -> None:
         super().__init__("vslam_frontend")
         self.declare_parameter("kf_scale", 2)     # reducción de la imagen del KF
         self.declare_parameter("features", "orb")
+        self.declare_parameter("stereo_bf", 0.0)  # 0 = default del tracker (TUM)
+        self.declare_parameter("depth_max", 0.0)  # 0 = default del tracker
+        self._active = False
         self._tracker = None
         self._maps = None
         self._n_kfs = 0
 
-        self.pub_odom = self.create_publisher(Odometry, "/vslam/odom", 10)
-        self.pub_state = self.create_publisher(TrackingState,
-                                               "/vslam/tracking_state", 10)
-        # Keyframes con QoS FIABLE: perder uno corrompe el mapa (ros2/README).
-        self.pub_kf = self.create_publisher(Keyframe, "/vslam/keyframes", 50)
-        self._tf = TransformBroadcaster(self)
+    # ── lifecycle ─────────────────────────────────────────────────────────────
 
+    def on_configure(self, state) -> TransitionCallbackReturn:
+        self.pub_odom = self.create_lifecycle_publisher(Odometry,
+                                                        "/vslam/odom", 10)
+        self.pub_state = self.create_lifecycle_publisher(
+            TrackingState, "/vslam/tracking_state", 10)
+        # Keyframes con QoS FIABLE: perder uno corrompe el mapa (ros2/README).
+        self.pub_kf = self.create_lifecycle_publisher(Keyframe,
+                                                      "/vslam/keyframes", 50)
+        self._tf = TransformBroadcaster(self)
         self.create_subscription(CameraInfo, "/camera/camera_info",
                                  self._on_info, qos_profile_sensor_data)
         sub_img = Subscriber(self, Image, "/camera/image_raw",
@@ -66,7 +80,25 @@ class FrontendNode(Node):
         self._sync = ApproximateTimeSynchronizer([sub_img, sub_depth],
                                                  queue_size=10, slop=0.05)
         self._sync.registerCallback(self._on_frame)
-        self.get_logger().info("esperando camera_info para armar el tracker...")
+        self.get_logger().info("configurado: esperando camera_info y activate")
+        return TransitionCallbackReturn.SUCCESS
+
+    def on_activate(self, state) -> TransitionCallbackReturn:
+        self._active = True
+        self.get_logger().info("ACTIVO: procesando frames")
+        return super().on_activate(state)
+
+    def on_deactivate(self, state) -> TransitionCallbackReturn:
+        self._active = False
+        self.get_logger().info("PAUSADO: los frames del driver se ignoran")
+        return super().on_deactivate(state)
+
+    def on_cleanup(self, state) -> TransitionCallbackReturn:
+        self._tracker = None                 # el siguiente ciclo = SLAM nuevo
+        self._maps = None
+        self._n_kfs = 0
+        self.get_logger().info("limpio: tracker destruido")
+        return TransitionCallbackReturn.SUCCESS
 
     # ── armado perezoso: el tracker nace de la CameraInfo (como de un driver) ─
 
@@ -88,13 +120,20 @@ class FrontendNode(Node):
                                    matcher=create_matcher("ratio"),
                                    local_window=8, local_ba=True,
                                    loop_closure=True)
+        bf = float(self.get_parameter("stereo_bf").value)
+        if bf > 0:
+            self._tracker.STEREO_BF = bf     # estéreo real (EuRoC): bf del rig
+        dmax = float(self.get_parameter("depth_max").value)
+        if dmax > 0:
+            self._tracker.DEPTH_MAX = dmax
         self.get_logger().info(
-            f"tracker listo ({feats}, {cam.width}x{cam.height})")
+            f"tracker listo ({feats}, {cam.width}x{cam.height}"
+            f"{f', bf={bf}' if bf > 0 else ''})")
 
     # ── por frame: procesar y traducir ────────────────────────────────────────
 
     def _on_frame(self, img_msg: Image, depth_msg: Image) -> None:
-        if self._tracker is None:
+        if not self._active or self._tracker is None:
             return
         gray = np.frombuffer(img_msg.data, np.uint8).reshape(
             img_msg.height, img_msg.width)
@@ -139,7 +178,7 @@ class FrontendNode(Node):
             self._publish_keyframe(stamp, rect, drect)
 
     def _publish_keyframe(self, stamp, rect, drect) -> None:
-        """El contrato del mapper denso (v0.7): imagen + profundidad + pose."""
+        """El contrato del mapper denso (v0.7): imagen + profundidad + pose + K."""
         sc = int(self.get_parameter("kf_scale").value)
         h, w = rect.shape[0] // sc, rect.shape[1] // sc
         kf = Keyframe()
