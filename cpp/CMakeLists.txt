@@ -6,8 +6,10 @@
 #   - guided_match  (matching guiado por reproyección: era el 37% del frame)
 # El BA va por GTSAM (vslam/backend/gtsam_ba.py), no por aquí.
 #
-# Compilar (Windows, generador Visual Studio; en Linux basta Ninja/Make):
-#   PY=C:/Users/ariel/miniforge3/envs/vslam/python.exe
+# Compilar (Windows, generador Visual Studio; en Linux basta Ninja/Make).
+# PY = el python del entorno donde vayas a importar el módulo (p. ej. el de tu
+# venv/conda: `python -c "import sys; print(sys.executable)"`):
+#   PY=/ruta/a/tu/entorno/python
 #   cmake -S cpp -B cpp/build -A x64 \
 #         -DPython3_EXECUTABLE=$PY \
 #         -Dpybind11_DIR=$($PY -c "import pybind11; print(pybind11.get_cmake_dir())")

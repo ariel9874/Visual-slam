@@ -12,6 +12,15 @@ Repositorio de **Visual SLAM (vSLAM)** con doble propósito:
    diseñada para evolucionar hacia eso, con implementaciones en Python (prototipado/didáctica)
    y C++ (rendimiento), e integración futura con ROS 2.
 
+## ¿Empiezas desde cero? → [aprende-vslam](https://github.com/arielvazquez/aprende-vslam)
+
+Este repositorio es un **sistema**: se lee bien si ya sabes de qué va el SLAM.
+Si vienes sin conocimientos previos, existe un curso hermano que lo descompone en
+niveles independientes y autoejecutables — de *"una imagen es una matriz de números"*
+hasta un SLAM completo con bundle adjustment y cierre de bucle, cada nivel con su
+examen y su número esperado. **Este repo es el destino; aquel es el camino.**
+(Su diseño está en [docs/07](docs/07_plan_curso_por_niveles.md).)
+
 ## Documentación
 
 | Documento | Contenido |
