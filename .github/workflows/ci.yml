@@ -100,3 +100,29 @@ jobs:
             echo "==== $t ===="
             python "tests/$t.py"
           done
+
+  package:
+    name: paquete (build + twine + wheel)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Construir y validar sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*
+
+      - name: Instalar la wheel en limpio y probar el import raíz
+        # Desde $RUNNER_TEMP (fuera del repo): lo que se importa es la WHEEL
+        # instalada, no el árbol fuente. Sin torch/gtsam en este job: que el
+        # import raíz funcione ES la garantía del API freeze de v0.9 (los
+        # pesados son perezosos; __all__ congelado en 16 nombres).
+        run: |
+          pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          python -c "import vslam; assert len(vslam.__all__) == 16, vslam.__all__; print('vslam', vslam.__version__, 'OK')"

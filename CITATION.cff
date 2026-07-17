@@ -1,0 +1,21 @@
+# Metadatos de cita legibles por máquina (GitHub muestra el botón
+# "Cite this repository" con esto). Actualizar version/date al taggear.
+cff-version: 1.2.0
+message: "Si usas este software en investigación o docencia, cítalo así."
+title: "vslam-edu: Visual SLAM educativo y modular"
+type: software
+authors:
+  - family-names: "Vazquez Dominguez"
+    given-names: "Ariel Eliezer"
+    email: "ariel98745@gmail.com"
+version: 1.0.0
+date-released: "2026-07-17"
+repository-code: "https://github.com/ariel9874/Visual-slam"
+url: "https://github.com/ariel9874/Visual-slam"
+license: MIT
+keywords:
+  - slam
+  - visual-odometry
+  - robotics
+  - computer-vision
+  - gaussian-splatting

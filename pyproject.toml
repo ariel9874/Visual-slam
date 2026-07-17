@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=64"]
+# >=77: soporte de licencia SPDX (PEP 639) — sin warnings de deprecación al construir.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,20 +9,33 @@ version = "1.0.0"
 description = "Visual SLAM educativo y modular: frontend de tracking, backend de grafos de factores y mapeo intercambiable (3DGS y ROS 2 incluidos; cada decision medida)."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Ariel Eliezer Vazquez Dominguez", email = "ariel98745@gmail.com" }]
 keywords = ["slam", "visual-odometry", "robotics", "computer-vision", "gaussian-splatting"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Education",
     "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    # Las tres verificadas por la matrix del CI (tests + humo sintético).
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 dependencies = [
     "numpy>=1.24,<2",          # gtsam (extra) exige <2; el nucleo lo respeta
     "opencv-python>=4.8,<5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ariel9874/Visual-slam"
+Repository = "https://github.com/ariel9874/Visual-slam"
+Issues = "https://github.com/ariel9874/Visual-slam/issues"
+Documentation = "https://github.com/ariel9874/Visual-slam/tree/main/docs"
+"Curso hermano (aprende-vslam)" = "https://github.com/ariel9874/aprende-vslam"
 
 [project.optional-dependencies]
 viz = ["matplotlib>=3.7"]
