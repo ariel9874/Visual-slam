@@ -4,12 +4,14 @@
 > asistente) que continúe el desarrollo. Contiene TODO lo necesario para
 > retomar el trabajo sin re-descubrir nada: contexto, metodología, estado
 > exacto con números, lecciones medidas, deuda técnica y el siguiente paso
-> detallado. Última actualización: julio 2026, **v0.7 COMPLETA (pendiente de
-> commit)** — mapa denso 3DGS: 21.0 dB en fr1/desk full-res (criterio
-> recalibrado a paridad SOTA ≥21; gsplat SOLO en Docker por el mangling de
-> Windows) + mapper denso EN VIVO en proceso propio (+25% de latencia medida,
-> 0 frames perdidos). Lecciones 39-42. v0.6 CERRADA: RGB-D fr1 2.8/fr2 1.5 cm,
-> estéreo V1_01 6.9 cm, `--fast` en paridad (lecciones 35-38).
+> detallado. Última actualización: julio 2026, **v1.0 COMMITEADA** — release:
+> pyproject `vslam-edu` 1.0.0, licencia MIT, CONTRIBUTING, tabla de benchmarks
+> en el README (fr2_xyz 1.5 / fr1_desk 2.8 cm métrico, fr2_desk 46.7 fps,
+> V1_01 6.9 cm estéreo, 3DGS 21.0 dB). Pendientes MANUALES de Ariel:
+> `python -m build` + `twine upload` (vslam-edu aún NO está en PyPI),
+> tag `v1.0.0` + GitHub Release, video demo. Historial reciente: v0.7 3DGS
+> (lecciones 39-42), v0.8 ROS 2 (43-44), v0.9 endurecimiento (45-46);
+> v0.6 RGB-D fr1 2.8/fr2 1.5 cm, estéreo V1_01 6.9 cm (35-38).
 
 ---
 
@@ -45,7 +47,7 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
    (ejemplo real: `MIN_INIT_FLOW_PX` se eligió midiendo ATE con 25/40/60 px),
    nunca a ojo.
 3. **Las lecciones medidas se documentan EN EL CÓDIGO**, junto a la línea que
-   las encarna, con los números medidos. Ver §5: hay ~17 y son oro educativo.
+   las encarna, con los números medidos. Ver §5: hay 46 y son oro educativo.
    Los enfoques probados y DESCARTADOS también se documentan (con su medición)
    como comentario donde habrían vivido.
 4. **Ciclo de depuración**: cuando algo falla, NO adivinar en el código —
@@ -95,7 +97,7 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
 
 ---
 
-## 3. Estado exacto al cierre de v0.4a
+## 3. Estado exacto por versión (v0.1 → v1.0)
 
 ### 3.1 Qué existe (por versión, con sus números)
 
@@ -114,6 +116,10 @@ Estas reglas emergieron del propio desarrollo y han demostrado su valor:
 | v0.6 hito 2 | **Residuos de PROFUNDIDAD en el BA** (estéreo virtual ORB-SLAM2: u_R = u − bf/z, residuo [u,v,u_R], `STEREO_BF=40`) + **bug raíz de fr1_desk**: su stream depth arranca tarde → init MONOCULAR accidental → mapa mixto gauge/metros con `_metric=False` (escala 1.008 de casualidad); fix: el driver espera profundidad + invariante "puntos desde depth SOLO en mapa métrico" (lección 36) | **CRITERIO v0.6 CUMPLIDO en ambas**: **fr1_desk 2.8 cm MÉTRICO** (escala 1.005, 0 perdidos, online 3.4) y **fr2_xyz 1.5 cm** (escala 0.96, 80 bucles; antes 4.7). Ablación fr1 sin residuo: 12.8 cm, 244 perdidos — el residuo ES lo que cruza el episodio 200-340 |
 | v0.6 hito 3 | **ESTÉREO REAL** (EuRoC): `EuRoCStereoRig` (rectificación cv2.stereoRectify, bf desde P2) + `EuRoCStereoLoader` (disparidad StereoSGBM → profundidad densa, MISMA firma que RGB-D); `examples/06 --stereo`. La cámara derecha virtual se vuelve real: u_R medido, mismo residuo del BA (lección 37) | **V1_01_easy ESTÉREO (final de KFs): 6.9 cm rmse, escala similitud 1.002** (234 KFs, 27 bucles SE(3), 34 perdidos) — métrico real sobre dron 6-DoF. Rig verificado: baseline 11.01 cm, bf 48.0. Tests: tests/test_stereo.py (2, sin el dataset) |
 | v0.7 hito 1-2 | **MAPA DENSO 3DGS**: rasterizador diferenciable EWA (gaussian_render.py, PyTorch puro) + `GaussianSplattingMapper` detrás de MapperBase (siembra desde la nube dispersa, optimize=renderiza-y-compara, update_poses rígido por submapa). Ejemplo 07 sobre fr1/desk (lección 39) | Rasterizador y mapper verdes: sobreajuste de vista **PSNR > 30 dB**, multi-vista **> 30 dB**, gradiente por diferencias finitas, update_poses rígido exacto. fr1/desk real: EN PROGRESO (render a resolución reducida; full-res = gemela gsplat pendiente). Tests: test_gaussian_render.py (3), test_gaussian_mapper.py (2) |
+
+(La tabla llega hasta v0.7 hitos 1-2; v0.7 completa, v0.8 ROS 2, v0.9
+endurecimiento y v1.0 release están detallados con sus números en §7 y en
+las lecciones 39-46 de §5.)
 
 ### 3.2 Números de referencia actuales (para detectar regresiones)
 
@@ -274,12 +280,15 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
 
 ### 3.5 Estado administrativo — ¡IMPORTANTE!
 
-- **Git: repo con commits (rama main).** OJO: `CLAUDE.md`, `docs/05` y
-  `tests/test_relocalization.py` siguen SIN versionar (untracked); README,
-  tracker.py y sparse.py tienen cambios de v0.4b sin commitear. Ofrecer el
-  commit de cierre de v0.4b. Su perfil de GitHub tiene un bloque comentado
-  esperando a que este repo sea público.
-- Licencia sin decidir (sugerido MIT/Apache-2.0; pyproject sin campo license).
+- **Git: repo AL DÍA (rama main, working tree limpio, v1.0 committeada).**
+  CLAUDE.md, docs/05 y todos los tests están versionados. El repo YA es
+  PÚBLICO (github.com/ariel9874/Visual-slam) → recordar a Ariel activar el
+  bloque comentado de su perfil de GitHub que lo esperaba. El curso hermano
+  vive en github.com/ariel9874/aprende-vslam (público).
+- Licencia: **MIT** (LICENSE en la raíz desde v0.9; deps permisivas).
+- Pendientes MANUALES de release (verificado 2026-07-17): `python -m build` +
+  `twine upload` (vslam-edu NO está aún en PyPI), tag `v1.0.0` + GitHub
+  Release, video demo (opcional).
 - `data/` y `output/` están en .gitignore (regenerables con los scripts).
 - Memoria persistente de sesiones: `C:\Users\ariel\.claude\projects\
   c--Users-ariel-Documents-GitHub-Visual-slam\memory\` (perfil del usuario).
@@ -1135,7 +1144,7 @@ Resumen operativo de lo inmediato:
     la cola del worker (carrera CUDA real cazada y eliminada). Criterio
     (2ª mitad) CUMPLIDO: mismos 596/596 frames con mapper ON, 80/80 KFs,
     0 fallos (examples/08, tabla en la lección 42).
-  - **v0.7 COMPLETA** (pendiente de commit). Opcional no bloqueante: margen de
+  - **v0.7 COMPLETA** (committeada). Opcional no bloqueante: margen de
     PSNR (SSIM, ponderar KFs por blur), color RGB (el pipeline va en gris),
     Replica para el criterio >30 dB sintético.
 - **v0.8 — ROS 2** (EN PROGRESO — criterio principal CUMPLIDO, lección 43):
@@ -1165,8 +1174,10 @@ Resumen operativo de lo inmediato:
   - ✅ LICENCIA: **MIT** (decisión de Ariel; GTSAM es BSD-3 y todas las deps
     son permisivas — solo se importan, no imponen nada). LICENSE en la raíz;
     package.xml/setup.py de ROS actualizados. **v0.9 COMPLETA.**
-- **v1.0**: PyPI, semver, LICENSE, CONTRIBUTING, tabla de benchmarks en el
-  README, video demo.
+- **v1.0 — COMMITEADA**: pyproject `vslam-edu` 1.0.0 (semver), LICENSE MIT,
+  CONTRIBUTING, tabla de benchmarks en el README. Pendiente MANUAL de Ariel:
+  `python -m build` + `twine upload` (PyPI), tag `v1.0.0` + GitHub Release,
+  video demo (opcional).
 
 ---
 
@@ -1174,7 +1185,7 @@ Resumen operativo de lo inmediato:
 
 | Ítem | Nota |
 |---|---|
-| Primer commit pendiente | Prioridad administrativa #1 |
+| ~~Primer commit pendiente~~ SALDADA | Repo con commits, público y v1.0 committeada |
 | `covisible_kfs` es O(KFs×obs) y se llama POR FRAME | A ~50+ KFs necesitará caché/índice invertido (pid→KFs) |
 | `snapshot()` reconstruye arrays por frame | Aceptable ahora; cachear cuando se perfile |
 | `_kf_db` guarda kps+desc de todos los KFs | Memoria lineal; BoW lo reemplazará |
@@ -1187,7 +1198,7 @@ Resumen operativo de lo inmediato:
 | Modo --no-ba del corredor colapsa (~200 cm) | Conocido; no es objetivo |
 | ~~Adaptadores GTSAM sin residuo de profundidad~~ SALDADA (v0.6, lección 38) | gtsam_ba y gtsam_isam2 usan `GenericStereoFactor3D` + `Cal3_S2Stereo` cuando llega u_R. `--fast --depth` validado: fr2_xyz 1.4 / fr1_desk 2.5 cm, paridad con NumPy |
 | examples/01 y tracker comparten conceptos duplicados | Deliberado (didáctica); no unificar |
-| Licencia sin decidir | Preguntar a Ariel en el commit |
+| ~~Licencia sin decidir~~ SALDADA (v0.9) | MIT (decisión de Ariel); deps permisivas (GTSAM es BSD-3) |
 
 ---
 
@@ -1196,8 +1207,12 @@ Resumen operativo de lo inmediato:
 1. Leer este documento completo y el README.
 2. `git status` — verificar si ya hubo commits (si no: recordar ofrecerlo).
 3. Si `data/` no existe, regenerar (comandos en §3.2).
-4. Correr los 5 archivos de tests (§3.2) — 21 OK esperados.
+4. Correr los tests de §3.2 (23 archivos en tests/, runner `__main__`) —
+   todos verdes esperados (gtsam/C++ se saltan limpio si falta la dep;
+   los de torch/gsplat requieren el env `vslam` o Docker).
 5. Correr ejemplos 02 y 04 y comparar contra los números de referencia.
-6. v0.4b CERRADA. Continuar con **v0.45 (datos reales)** — §7 y docs/04 —
+6. v1.0 COMMITEADA. Pendientes manuales de release en §3.5 (PyPI, tag,
+   video). Siguiente trabajo: deuda de §8 y restantes de §7 (EuRoC
+   MH_*/V2_*, --fast en examples/06, benchmark completo con learned) —
    salvo que Ariel indique otra cosa. Recordar: usar el env conda `vslam`
    (§2), NO el Python del sistema.

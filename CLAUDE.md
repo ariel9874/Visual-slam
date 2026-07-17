@@ -1,7 +1,7 @@
 # Visual-SLAM — instrucciones para sesiones de desarrollo
 
 **ANTES DE TOCAR NADA**: lee [docs/05_estado_y_plan_de_continuacion.md](docs/05_estado_y_plan_de_continuacion.md)
-— contiene el estado exacto del proyecto, la metodología acordada, las ~17
+— contiene el estado exacto del proyecto, la metodología acordada, las 46
 lecciones medidas (no re-descubrirlas), la deuda técnica conocida y el plan
 paso a paso del siguiente hito. Es el documento de traspaso entre sesiones y
 DEBE mantenerse actualizado al cerrar cada etapa.
@@ -11,8 +11,8 @@ DEBE mantenerse actualizado al cerrar cada etapa.
 - Repo educativo + arquitectura seria: la matemática va EN el código (bloques
   `─── La matemática ───`, en español; identificadores en inglés). Cada
   decisión con su medición; cada enfoque descartado, documentado con números.
-- Nada se fusiona sin ejecutarse: tests (`python tests/test_X.py`, 21 en
-  total) + ejemplos con ATE vs ground truth. Números de referencia y comandos
+- Nada se fusiona sin ejecutarse: tests (`python tests/test_X.py`, 23
+  archivos) + ejemplos con ATE vs ground truth. Números de referencia y comandos
   en docs/05 §3.2. Umbrales solo por barrido medido.
 - Convenciones fijas: `T_w_c` (cámara→mundo, ejes OpenCV), tangente `[ρ, ω, λ]`,
   gauge mediana=1, formato TUM. Interfaces de docs/02 no se rompen.
@@ -24,11 +24,11 @@ DEBE mantenerse actualizado al cerrar cada etapa.
 - El usuario (Ariel) es experto en SLAM (Ph.D., GTSAM/LiDAR profesional):
   tono de colega arquitecto, en español, trabajo por fases de la hoja de ruta
   ([docs/04](docs/04_hoja_de_ruta_v1.md)).
-- Estado git: repo con commits (rama main); CLAUDE.md y docs/05 aún SIN
-  versionar. Ofrecer commit al cerrar cada etapa. `data/` y `output/` se
+- Estado git: repo AL DÍA y PÚBLICO (rama main; CLAUDE.md, docs/05 y tests
+  versionados). Ofrecer commit al cerrar cada etapa. `data/` y `output/` se
   regeneran con scripts (están en .gitignore).
 
-## Estado actual: v1.0 LISTA PARA RELEASE — pendiente de commit + publicación
+## Estado actual: v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 
 **v1.0**: pyproject.toml actualizado (`vslam-edu` 1.0.0, deps numpy<2 +
 opencv, extras deep/gtsam/dense, license MIT), `__version__` 1.0.0 (import
@@ -36,10 +36,12 @@ verificado), CONTRIBUTING.md (las 6 reglas del repo), README con checklist
 completo y TABLA DE BENCHMARKS (fr2_xyz 1.5 / fr1_desk 2.8 / fr2_desk 46.7
 fps / V1_01 6.9 cm / 3DGS 21.0 dB). PASOS MANUALES de Ariel: `python -m
 build` + `twine upload` (PyPI), tag `v1.0.0`, y el video demo (opcional).
+Verificado 2026-07-17: vslam-edu NO está aún en PyPI y no hay tag v1.0.0;
+el repo SÍ es público y el curso hermano vive en ariel9874/aprende-vslam.
 
 ## v0.9 COMPLETA (endurecimiento)
 
-**v0.9 (fase actual, lección 45)**: hito 1 = **config declarativa**
+**v0.9 (lección 45)**: hito 1 = **config declarativa**
 (`vslam/config.py`: las constantes de clase siguen siendo la documentación; el
 YAML/JSON sobreescribe POR INSTANCIA; config vacía = bit-idéntico; typo falla
 en el arranque; plantilla generada con `python -m vslam.config`; `--config` en
@@ -56,13 +58,13 @@ fallo). Hito 4: **docs/06** (3DGS, visita guiada de L39-42). Hito 5: **API
 FREEZE** — vslam/__init__.py v0.9.0, 16 nombres en __all__, import raíz sin
 torch/gtsam (verificado). Tests: +7 (config 5, reset 1, concurrencia 1) y el
 bug del frame ciego arreglado. LICENCIA: **MIT** (LICENSE en la raíz; GTSAM
-es BSD-3, todas las deps permisivas — no imponen nada). **v0.9 COMPLETA —
-pendiente de commit. Siguiente: v1.0** (PyPI, README benchmarks,
+es BSD-3, todas las deps permisivas — no imponen nada). **v0.9 COMPLETA y
+committeada. Siguiente: v1.0** (PyPI, README benchmarks,
 CONTRIBUTING, video demo). Docs/05 §7.
 
 ## v0.8 (ROS 2) — criterio CUMPLIDO
 
-**v0.8 (fase actual, lección 43)**: `ros2/vslam_msgs` (Keyframe con imagen+
+**v0.8 (lección 43)**: `ros2/vslam_msgs` (Keyframe con imagen+
 depth+pose ÓPTICA+K; PoseGraphEdge; TrackingState) + `ros2/vslam_ros` (4 nodos
 rclpy finos: dataset/frontend/backend/mapper). Conversión de ejes óptico↔REP-103
 por CONJUGACIÓN solo en conversions.py (regla 4: el núcleo no importa ROS). El
@@ -78,7 +80,7 @@ bf por parámetro; smoke: metric=True, 41k pts). OJO bash: `source X && ros2
 launch ... &` backgroundea la lista ENTERA (usar `;`). Restante: webcam
 (usbipd-win + rama monocular, decisión anotada). Docs/05 §7.
 
-## v0.7 COMPLETA (mapa denso 3DGS) — pendiente de commit
+## v0.7 COMPLETA (mapa denso 3DGS)
 
 **v0.7 (COMPLETA)**: `GaussianSplattingMapper` detrás de `MapperBase` (la
 tesis de docs/01 §3.2: cambiar la representación del mapa sin tocar frontend ni
@@ -111,7 +113,7 @@ Replica. Lecciones 39-42, docs/05 §7.
 640×480 en CPU, ATE en paridad. Stack rápido opt-in (`--fast` = isam2 + hilo de
 mapeo; C++ y BoW auto); referencia NumPy de default. Lecciones 30-34.
 
-**v0.6 (fase actual)**: RGB-D y estéreo. Criterio: TUM fr1_desk y fr2_xyz con
+**v0.6**: RGB-D y estéreo. Criterio: TUM fr1_desk y fr2_xyz con
 **ATE < 5 cm MÉTRICO** (alineación rígida; escala Umeyama ≈ 1.0) — **CUMPLIDO
 EN AMBAS: fr1_desk 2.8 cm (escala 1.005, 0 perdidos) y fr2_xyz 1.5 cm (escala
 0.96, 80 bucles)**. Hito 1 (lección 35): init RGB-D instantánea (`_metric`),
@@ -147,7 +149,7 @@ ORB-SLAM. Límites medidos (lecciones 28-29): fr1 handheld (SuperPoint rescata
 560→140) y fr3 deriva — techo del enfoque, no se sigue puliendo. Lecciones 21-29
 en docs/05 §5. OJO: GBA OFFLINE (`global_bundle_adjustment`, lección 26).
 
-**v0.5 (fase actual)**: núcleo C++ para tiempo real. Criterio: 30 fps a 640×480,
+**v0.5**: núcleo C++ para tiempo real. Criterio: 30 fps a 640×480,
 mismo ATE ±5%. Progreso medido en fr2_desk/ORB: 4.3 fps → 9.5 (BA GTSAM batch,
 lección 30) → **~21 fps** (matching guiado en C++ `vslam_cpp`, lección 31; TRACK
 25-29 ms — tiempo real) + **iSAM2 incremental** (`ba_backend="isam2"`, lección 32:

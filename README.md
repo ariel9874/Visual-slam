@@ -12,14 +12,13 @@ Repositorio de **Visual SLAM (vSLAM)** con doble propósito:
    diseñada para evolucionar hacia eso, con implementaciones en Python (prototipado/didáctica)
    y C++ (rendimiento), e integración futura con ROS 2.
 
-## ¿Empiezas desde cero? → [aprende-vslam](https://github.com/arielvazquez/aprende-vslam)
+## ¿Empiezas desde cero? → [aprende-vslam](https://github.com/ariel9874/aprende-vslam)
 
 Este repositorio es un **sistema**: se lee bien si ya sabes de qué va el SLAM.
 Si vienes sin conocimientos previos, existe un curso hermano que lo descompone en
 niveles independientes y autoejecutables — de *"una imagen es una matriz de números"*
 hasta un SLAM completo con bundle adjustment y cierre de bucle, cada nivel con su
 examen y su número esperado. **Este repo es el destino; aquel es el camino.**
-(Su diseño está en [docs/07](docs/07_plan_curso_por_niveles.md).)
 
 ## Documentación
 
@@ -29,7 +28,8 @@ examen y su número esperado. **Este repo es el destino; aquel es el camino.**
 | [docs/02_arquitectura.md](docs/02_arquitectura.md) | Diseño del repositorio: contratos de datos, módulos intercambiables, estrategia C++/Python y plan de integración con ROS 2. |
 | [docs/03_detectores_y_matchers.md](docs/03_detectores_y_matchers.md) | Catálogo razonado de 12 detectores y 6 matchers (clásicos y aprendidos): idea matemática, costos y guía de selección. |
 | [docs/04_hoja_de_ruta_v1.md](docs/04_hoja_de_ruta_v1.md) | El plan completo hacia v1.0: etapas, criterios de aceptación medibles, riesgos y lo que deliberadamente queda fuera. |
-| [docs/05_estado_y_plan_de_continuacion.md](docs/05_estado_y_plan_de_continuacion.md) | Documento de traspaso: estado exacto con números, metodología, las 17 lecciones medidas, deuda técnica y el siguiente paso detallado. |
+| [docs/05_estado_y_plan_de_continuacion.md](docs/05_estado_y_plan_de_continuacion.md) | Documento de traspaso: estado exacto con números, metodología, las 46 lecciones medidas, deuda técnica y el siguiente paso detallado. |
+| [docs/06_mapa_denso_3dgs.md](docs/06_mapa_denso_3dgs.md) | El mapa denso 3DGS (v0.7): visita guiada del rasterizador diferenciable, el `GaussianSplattingMapper` y la cadena de ablaciones hasta 21.0 dB (lecciones 39-42). |
 
 ## Estructura
 
@@ -51,10 +51,13 @@ Visual-slam/
 
 ## Inicio rápido
 
-Requisitos: Python ≥ 3.9 con `numpy` y `opencv-python` (`matplotlib` opcional para gráficas).
+Requisitos: Python ≥ 3.10 con `numpy` (<2) y `opencv-python` (`matplotlib` opcional para gráficas).
 
 ```bash
-# 1) Instalar el paquete en modo editable (desde la raíz del repo)
+# 1) Instalar la librería desde PyPI…
+pip install vslam-edu
+#    …o en modo editable desde la raíz del repo (los ejemplos y scripts de
+#    abajo viven en el repo: clónalo para seguir el recorrido completo)
 pip install -e ".[viz]"
 
 # 2) Generar una secuencia sintética con ground truth (no necesitas descargar nada)
@@ -131,11 +134,6 @@ Cada número con su comando de reproducción en [docs/05 §3.2](docs/05_estado_y
 
 El plan detallado — con criterios de aceptación medibles por etapa, riesgos y lo que
 deliberadamente queda fuera de 1.0 — está en [docs/04_hoja_de_ruta_v1.md](docs/04_hoja_de_ruta_v1.md).
-
-## Próximos pasos administrativos
-
-- Elegir licencia (sugerencia: MIT o Apache-2.0) y añadir `LICENSE`.
-- Hacer el primer commit y publicar en GitHub.
 
 ## Referencias principales
 
