@@ -1,5 +1,7 @@
 # Visual SLAM — Laboratorio Educativo y Arquitectura Híbrida
 
+[![CI](https://github.com/ariel9874/Visual-slam/actions/workflows/ci.yml/badge.svg)](https://github.com/ariel9874/Visual-slam/actions/workflows/ci.yml)
+
 Repositorio de **Visual SLAM (vSLAM)** con doble propósito:
 
 1. **Recurso educativo**: código legible y documentación en español que explica, paso a paso,

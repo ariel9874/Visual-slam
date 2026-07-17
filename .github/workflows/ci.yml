@@ -1,10 +1,16 @@
 name: CI
 
-# Verificación reproducible del núcleo geométrico (v0.45). NO instala gtsam ni
-# torch: los 21 tests de geometría + el de distorsión son NumPy + OpenCV puro
-# (el frontend aprendido y el adaptador GTSAM se prueban aparte, con GPU/conda).
-# Es la pata "reproducible" del criterio de datos reales: si esto pasa en un
-# Ubuntu limpio, cualquiera reproduce los números sintéticos del repo.
+# Dos patas (v1.0):
+#   1) `tests` (matrix 3.10-3.12): el núcleo NumPy+OpenCV en un Ubuntu limpio.
+#      Los tests se DESCUBREN por glob — la lista escrita a mano llegó a v1.0
+#      sin 9 de los 23 archivos (4 ejecutables aquí: config, map_reset,
+#      concurrency, stereo; 5 con guard de torch). Los que exigen una dep
+#      ausente (gtsam, vslam_cpp, torch, gsplat) se saltan limpio por su guard.
+#   2) `extras`: instala gtsam (wheel manylinux) y COMPILA vslam_cpp — los
+#      tests de equivalencia de las gemelas (lecciones 30-32 y 38) se EJECUTAN
+#      de verdad en vez de saltarse. Sin torch: el mapper denso 3DGS se prueba
+#      local/Docker (docs/06). Sin datasets reales: TUM/EuRoC/KITTI son GBs;
+#      el CI es la pata sintética reproducible (docs/05 §3.2).
 
 on:
   push:
@@ -15,12 +21,16 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
 
       - name: Instalar dependencias del núcleo
         # numpy<2 y opencv<5: la misma combinación validada en el env conda
@@ -29,16 +39,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install "numpy<2" "opencv-python-headless>=4.8,<5" "matplotlib>=3.7"
 
-      - name: Tests de geometría (21) + distorsión (3) + loader EuRoC (3)
+      - name: Tests (descubrimiento automático por glob)
+        # test_relocalization se excluye AQUÍ porque corre en el paso de humo
+        # (tras generar data/synthetic_loop) — única excepción a mano.
         run: |
           set -e
-          for t in test_pose_recovery test_frontends test_triangulation_pnp \
-                   test_pose_graph test_bundle_adjustment test_camera_distortion \
-                   test_euroc_loader test_gtsam_ba test_guided_match_cpp \
-                   test_isam2_ba test_async_mapping test_place_recognition \
-                   test_rgbd; do
+          for t in tests/test_*.py; do
+            if [ "$t" = "tests/test_relocalization.py" ]; then continue; fi
             echo "==== $t ===="
-            python "tests/$t.py"
+            python "$t"
           done
 
       - name: Humo sintético (secuencias + ejemplos + secuestro)
@@ -53,3 +62,41 @@ jobs:
               --gt data/synthetic/groundtruth.txt
           python examples/04_loop_closure.py
           python tests/test_relocalization.py
+
+  extras:
+    name: extras (gtsam + gemela C++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.11 = la versión validada con gtsam 4.2 (mismo par que el env vslam).
+          python-version: "3.11"
+
+      - name: Instalar núcleo + gtsam + pybind11
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy<2" "opencv-python-headless>=4.8,<5" "matplotlib>=3.7" \
+                      "gtsam>=4.2" pybind11
+
+      - name: Compilar vslam_cpp (gemela C++ del matching guiado)
+        # El .so queda en la RAÍZ del repo (cpp/CMakeLists.txt) y el tracker lo
+        # usa AUTO. En Linux basta el toolchain del runner (gcc + cmake).
+        run: |
+          cmake -S cpp -B cpp/build \
+                -DPython3_EXECUTABLE="$(which python)" \
+                -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+          cmake --build cpp/build --config Release
+          python -c "import vslam_cpp; print('vslam_cpp importado OK')"
+
+      - name: Tests de equivalencia (la dep PRESENTE — ya no se saltan)
+        # Las gemelas de rendimiento contra su referencia: BA GTSAM ≡ NumPy
+        # (incl. factor estéreo, lección 38), iSAM2, matching C++ ≡ Python, y
+        # el hilo de mapeo (usa isam2 y vslam_cpp al estar disponibles).
+        run: |
+          set -e
+          for t in test_gtsam_ba test_isam2_ba test_guided_match_cpp test_async_mapping; do
+            echo "==== $t ===="
+            python "tests/$t.py"
+          done
