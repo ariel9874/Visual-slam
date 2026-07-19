@@ -199,6 +199,11 @@ python examples/07_gaussian_mapping.py --root data/tum/rgbd_dataset_freiburg1_de
 # dead-reckoning sobre V1_01 real (esperado: rot mediana 0.33 grados / pos
 # 4.4 cm / p90 7.7 cm en ventanas de 1 s contra el GT de estado).
 python tests/test_imu_preintegration.py   # 4 (exactitud, sesgo 1er orden, gtsam, EuRoC)
+
+# INIT VI ESTÁTICA (v1.1 hito 2): ventana quieta + b_g + dir(g) + R_wb.
+#   Esperado (las 3 V1 vs GT): b_g err ≤ 2.3e-3 rad/s; dir(g) cruda ≤ 2.6
+#   grados (b_a manda, lección 48); con b_a del GT ≤ 0.63 grados.
+python tests/test_imu_init.py             # 4 (sintético, sin-reposo, degenerados, EuRoC)
 ```
 
 Notas: el modo `--no-ba` del ejemplo 04 da ~200 cm — es un modo de fallo
@@ -233,7 +238,9 @@ vslam/backend/   factor_graph.py (interfaz + teoría MAP), gtsam_ba.py (BA batch
                  bundle_adjustment.py (BA con Schur + jacobianos analíticos),
                  imu_preintegration.py (preintegración IMU en la variedad,
                  Forster TRO'17: referencia NumPy con jacobianos de sesgo y
-                 covarianza 9×9 [φ,v,p]; residuo del factor documentado, v1.1)
+                 covarianza 9×9 [φ,v,p]; residuo del factor documentado, v1.1),
+                 imu_init.py (init VI estática: detector de ventana quieta +
+                 b_g + gravedad en el cuerpo + R_wb yaw=0, v1.1 hito 2)
 vslam/mapping/   base.py (MapperBase), sparse.py (puntos+observaciones+
                  covisibilidad+re-anclaje SE3/Sim3+apply_similarity+PLY+
                  culling v0.4b: _active/cull_points/active_count)
@@ -920,6 +927,28 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     4.9 m; un frame mal, metros — este humo convierte "¿están bien q_RS,
     fuerza específica y g = −z?" en un número.
 
+48. **"Quieto" no es std pequeña — y la dirección de g hereda el sesgo del
+    acelerómetro** (v1.1 hito 2, imu_init.py). (a) En EuRoC el dron en
+    reposo VIBRA con los motores: std_acc 0.3-1.1 m/s² parado (2.4 en
+    vuelo); un detector estricto de varianza declara "nunca estático" en
+    V1_01/V1_02 (medido). El detector correcto: umbrales LAXOS que separan
+    reposo-vibrando de vuelo (std_gyro < 0.06, std_acc < 1.0) + |f̄| ≈ g +
+    CONSISTENCIA entre mitades de la ventana (una deriva lenta — lo
+    levantan en mano — pasa la std y falla ahí; V1_01 salta sus primeros
+    0.5 s por eso). La vibración es de MEDIA CERO: b_g sale con error
+    1.9-2.3e-3 rad/s en las tres V1 aun vibrando (el GT confirma reposo:
+    |v| ≤ 0.015 m/s). (b) En reposo f̄ = −Rᵀ·g + b_a: la dirección de g
+    queda ENTRELAZADA con b_a (error ≈ |b_a⊥|/g). Medido: 2.60° en V1_01
+    (¡|b_a| = 0.55 m/s² — el ADIS16448 arranca torcido!) y 0.44-0.80° en
+    V1_02/03; corrigiendo con el b_a del GT: 0.35-0.63° en las TRES. El
+    criterio "dir(g) < 1°" lo cumple el MÉTODO, pero b_a no es observable
+    en reposo (ni se distingue de inclinar g) — se refina en el grafo
+    (hito 3), como en todo VIO. (c) El yaw TAMPOCO es observable (g es
+    invariante a girar sobre la vertical): attitude_from_gravity devuelve
+    la rotación mínima (yaw = 0 por convención). Consecuencia para el hito
+    3: el grafo VI tiene gauge de 4 gdl (posición + yaw), no los 6/7 del
+    visual puro — los priors deben reflejarlo.
+
 ---
 
 ## 6. v0.4b — CERRADA (plan original abajo, como referencia de lo hecho)
@@ -1227,12 +1256,18 @@ Resumen operativo de lo inmediato:
     del CI): predict == dead-reckoning exacto (1e-13); sesgo a 1er orden;
     equivalencia GTSAM (deltas + predict + covarianza permutada); V1_01 real:
     rot 0.33° / pos 4.4 cm mediana en ventanas de 1 s contra el GT de estado.
-  - ⏳ HITO 2 — init visual-inercial: estimar gravedad (→ actitud inicial),
-    velocidad y sesgo de gyro. EuRoC arranca ~quieto: detector de ventana
-    estática (varianza del gyro) para b_g y dirección de g; criterio medible:
-    dirección de g < 1° del GT, b_g dentro de ~2σ del GT en las 5 secuencias
-    V1/V2/MH que tengamos. (La alineación dinámica tipo Martinelli/ORB-SLAM3
-    se anota como alternativa si el estático no basta en MH_*.)
+  - ✅ HITO 2 — init VI ESTÁTICA (lección 48): `vslam/backend/imu_init.py` —
+    detector de ventana quieta (el reposo de EuRoC VIBRA: umbrales laxos
+    calibrados + |f̄| ≈ g + consistencia entre mitades) que entrega b_g
+    (media del gyro), dirección de g en el cuerpo, R_wb inicial (rotación
+    mínima, yaw = 0 — no observable) y v = 0. MEDIDO contra el GT de estado
+    en las 3 V1 (tests/test_imu_init.py, 4 tests): b_g err 1.9-2.3e-3
+    rad/s; dir(g) cruda 0.44-2.60° (V1_01 limitada por su |b_a| = 0.55
+    m/s²) y 0.35-0.63° corrigiendo con el b_a del GT — el criterio < 1° lo
+    cumple el método; b_a se refina en el grafo (hito 3). Ventanas
+    detectadas: V1_01 [0.5, 2.5] s (salta la manipulación inicial),
+    V1_02/V1_03 [0, 2] s. (La alineación dinámica tipo Martinelli queda
+    como alternativa anotada si alguna secuencia MH_* arranca en vuelo.)
   - ⏳ HITO 3 — el factor IMU en el grafo rápido: estados de velocidad+sesgo
     por KF, `ImuFactor`/`CombinedImuFactor` (o Between de sesgo con random
     walk) en gtsam_isam2; la conversión mundo z-arriba (gravedad) ↔ frame
@@ -1246,11 +1281,23 @@ Resumen operativo de lo inmediato:
     (hoy velocidad constante, lección 24) desde la preintegración del gap
     entre frames — la palanca directa contra rotación rápida/blur, medible
     como inliers del guiado y frames perdidos en V1_02/V1_03.
-  - ⏳ HITO 5 — CRITERIO de v1.1 (calibrar al medir el baseline): paridad en
-    V1_01 (≤ 6.9 cm) y al menos DOS secuencias EuRoC que el estéreo puro de
-    v0.6 no logra (candidatas: V1_02_medium, V1_03_difficult, MH_04) con ATE
-    métrico < 10 cm y sin colapso. PRIMER PASO del hito: correr el baseline
-    estéreo v0.6 en V1_02/V1_03/MH_* para tener los números "sin IMU".
+  - ⏳ HITO 5 — CRITERIO de v1.1. BASELINE MEDIDO (jul 2026, examples/06
+    --stereo, ATE final-KF métrico; V1_02/V1_03 bajadas del mirror GlowBond
+    en HF — vicon_room1.zip trae bag+zip ASL por secuencia; el host ETH
+    sigue caído):
+    ```
+    V1_01_easy       6.9 cm  escala 1.002 |   34/2912 perdidos, 27 bucles   OK (regresión exacta de lección 37)
+    V1_02_medium   363.8 cm  escala 0.175 |  468/1710 perdidos, 11 relocs   COLAPSO
+    V1_03_difficult 339.7 cm escala 0.131 | 1683/2149 perdidos, 70 relocs   COLAPSO
+    ```
+    La escala 0.13-0.18 en un mapa "métrico" dice que el tracking se rompe
+    tanto que el mapa deja de ser mapa (V1_03 pasa el 78% del tiempo
+    perdido; 70 relocs = tormenta). Es el modo de fallo de las lecciones
+    28-29 en su versión extrema — rotación rápida + blur, no umbrales.
+    CRITERIO v1.1: paridad en V1_01 (≤ 6.9 cm) y V1_02 + V1_03 SIN colapso
+    con ATE métrico < 10 cm y escala ≈ 1 (referencia SOTA: ORB-SLAM3
+    estéreo-inercial reporta ~2 cm en ambas; <10 con margen es honesto para
+    un primer VIO).
 
 ---
 

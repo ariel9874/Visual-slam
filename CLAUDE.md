@@ -42,8 +42,19 @@ de 2º orden, no bit-exacto), `preintMeasCov` ordena (θ,p,v) y
 ACELERÓMETRO primero —; dead-reckoning REAL V1_01: rot 0.33°/pos 4.4 cm
 mediana a 1 s (valida frames/signos: un error daría metros).
 tests/test_imu_preintegration.py (4, guards gtsam/dataset) + job extras del
-CI. Siguiente: hito 2 (init VI: gravedad/sesgos por ventana estática); antes,
-baseline estéreo v0.6 en V1_02/V1_03/MH_*. Plan completo en docs/05 §7.
+CI. BASELINE estéreo v0.6 MEDIDO (define el criterio del hito 5): V1_01
+6.9 cm OK (regresión exacta); **V1_02 363.8 cm (escala 0.175, 468/1710
+perdidos) y V1_03 339.7 cm (escala 0.131, 1683/2149 perdidos, 70 relocs) —
+ambas COLAPSAN sin IMU**. Objetivo v1.1: ambas <10 cm, escala ≈1, sin
+colapso. Datos: V1_02/V1_03 extraídas en data/euroc/ (mirror GlowBond HF,
+vicon_room1.zip: trae bag+zip ASL). HITO 2 HECHO (lección 48):
+`vslam/backend/imu_init.py` — init estática (el reposo de EuRoC VIBRA:
+umbrales laxos + consistencia entre mitades; b_g err 1.9-2.3e-3 rad/s en
+las 3 V1; dir(g) cruda ≤ 2.6° — entrelazada con b_a, no observable en
+reposo — y ≤ 0.63° con b_a del GT; yaw no observable → R_wb con yaw=0 →
+el grafo VI tendrá gauge de 4 gdl). tests/test_imu_init.py (4). Siguiente:
+hito 3 (factor IMU en iSAM2; decisión pendiente: ¿BA VI de referencia
+NumPy o solo gemela GTSAM?). Plan completo en docs/05 §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 
