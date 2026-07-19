@@ -301,6 +301,63 @@ def _euroc_T_BS(root: str | Path, cam: str) -> np.ndarray:
     return np.array(_yaml_list(text, "data")).reshape(4, 4)
 
 
+# ── IMU EuRoC (v1.1: preintegración) ─────────────────────────────────────────
+
+def _yaml_scalar(text: str, key: str) -> float:
+    """Extrae el escalar `key: valor` de un YAML de EuRoC (ignora el comentario
+    a la derecha). El complemento de _yaml_list para los ruidos del IMU."""
+    m = re.search(rf"(?m)^\s*{re.escape(key)}\s*:\s*([-+0-9.eE]+)", text)
+    if not m:
+        raise ValueError(f"clave '{key}' no encontrada en el sensor.yaml")
+    return float(m.group(1))
+
+
+def read_euroc_imu(root: str | Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(timestamps_seg, gyro (N,3) [rad/s], accel (N,3) [m/s²]) de mav0/imu0.
+
+    Medidas CRUDAS en el frame del sensor S — que en EuRoC coincide con el
+    CUERPO B (imu0/sensor.yaml: T_BS = identidad). El acelerómetro mide FUERZA
+    ESPECÍFICA (no aceleración): en reposo lee ≈ +9.81 en su eje vertical.
+    """
+    csv = Path(root) / "mav0" / "imu0" / "data.csv"
+    data = np.loadtxt(csv, delimiter=",")
+    if data.ndim == 1:
+        data = data[None, :]
+    return data[:, 0] * 1e-9, data[:, 1:4].copy(), data[:, 4:7].copy()
+
+
+def euroc_imu_params(root: str | Path) -> dict:
+    """Ruidos del IMU de mav0/imu0/sensor.yaml — densidades espectrales
+    CONTINUAS [unidad/√Hz] — con los nombres que espera `ImuNoiseParams`
+    (vslam/backend/imu_preintegration.py): `ImuNoiseParams(**euroc_imu_params(root))`."""
+    text = (Path(root) / "mav0" / "imu0" / "sensor.yaml").read_text(encoding="utf-8")
+    return {
+        "gyro_noise_density": _yaml_scalar(text, "gyroscope_noise_density"),
+        "gyro_random_walk": _yaml_scalar(text, "gyroscope_random_walk"),
+        "accel_noise_density": _yaml_scalar(text, "accelerometer_noise_density"),
+        "accel_random_walk": _yaml_scalar(text, "accelerometer_random_walk"),
+        "rate_hz": _yaml_scalar(text, "rate_hz"),
+    }
+
+
+def read_euroc_state(root: str | Path) -> Tuple[np.ndarray, np.ndarray,
+                                                np.ndarray, np.ndarray,
+                                                np.ndarray, np.ndarray]:
+    """GT COMPLETO del estado: (ts, p_wb, q_wb [wxyz], v_w, bias_gyro, bias_accel).
+
+    A diferencia de `read_euroc_groundtruth` (posición de la CÁMARA, para el
+    ATE), este estado queda en el frame del CUERPO — el que preintegra el IMU
+    (T_BS = I para imu0) — y trae velocidades y sesgos: el ground truth de la
+    preintegración (v1.1). Posición/velocidad en el mundo; sesgos en el cuerpo.
+    """
+    gt_csv = Path(root) / "mav0" / "state_groundtruth_estimate0" / "data.csv"
+    data = np.loadtxt(gt_csv, delimiter=",")
+    if data.ndim == 1:
+        data = data[None, :]
+    return (data[:, 0] * 1e-9, data[:, 1:4].copy(), data[:, 4:8].copy(),
+            data[:, 8:11].copy(), data[:, 11:14].copy(), data[:, 14:17].copy())
+
+
 class EuRoCStereoRig:
     """Rectificación estéreo de un par EuRoC (cam0 izquierda, cam1 derecha).
 

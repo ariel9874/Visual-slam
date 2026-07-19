@@ -4,7 +4,8 @@
 > asistente) que continúe el desarrollo. Contiene TODO lo necesario para
 > retomar el trabajo sin re-descubrir nada: contexto, metodología, estado
 > exacto con números, lecciones medidas, deuda técnica y el siguiente paso
-> detallado. Última actualización: julio 2026, **v1.0 COMMITEADA** — release:
+> detallado. Última actualización: julio 2026, **v1.1 (VIO) EN PROGRESO** —
+> hito 1 (preintegración IMU, lección 47) HECHO y verde. v1.0 committeada — release:
 > pyproject `vslam-edu` 1.0.0, licencia MIT, CONTRIBUTING, tabla de benchmarks
 > en el README (fr2_xyz 1.5 / fr1_desk 2.8 cm métrico, fr2_desk 46.7 fps,
 > V1_01 6.9 cm estéreo, 3DGS 21.0 dB). Pendientes MANUALES de Ariel:
@@ -193,6 +194,11 @@ python tests/test_gaussian_render.py      # 3 (proyección, gradiente FD, sobrea
 python tests/test_gaussian_mapper.py      # 2 (multi-vista >30 dB, update_poses rígido)
 python examples/07_gaussian_mapping.py --root data/tum/rgbd_dataset_freiburg1_desk
 #   (siembra desde la nube dispersa + optimiza; PSNR de re-render a res. reducida)
+
+# PREINTEGRACIÓN IMU (v1.1 hito 1): referencia NumPy + equivalencia GTSAM +
+# dead-reckoning sobre V1_01 real (esperado: rot mediana 0.33 grados / pos
+# 4.4 cm / p90 7.7 cm en ventanas de 1 s contra el GT de estado).
+python tests/test_imu_preintegration.py   # 4 (exactitud, sesgo 1er orden, gtsam, EuRoC)
 ```
 
 Notas: el modo `--no-ba` del ejemplo 04 da ~200 cm — es un modo de fallo
@@ -224,7 +230,10 @@ vslam/backend/   factor_graph.py (interfaz + teoría MAP), gtsam_ba.py (BA batch
                  GTSAM, ≡ referencia NumPy), gtsam_isam2.py (BA INCREMENTAL
                  iSAM2 con reset por época, v0.5), pose_graph.py
                  (GaussNewtonPoseGraph genérico se3/sim3),
-                 bundle_adjustment.py (BA con Schur + jacobianos analíticos)
+                 bundle_adjustment.py (BA con Schur + jacobianos analíticos),
+                 imu_preintegration.py (preintegración IMU en la variedad,
+                 Forster TRO'17: referencia NumPy con jacobianos de sesgo y
+                 covarianza 9×9 [φ,v,p]; residuo del factor documentado, v1.1)
 vslam/mapping/   base.py (MapperBase), sparse.py (puntos+observaciones+
                  covisibilidad+re-anclaje SE3/Sim3+apply_similarity+PLY+
                  culling v0.4b: _active/cull_points/active_count)
@@ -233,7 +242,9 @@ vslam/core/      camera.py: + distorsión Brown-Conrady (v0.45): campo
 vslam/           evaluation.py (Umeyama + ATE), io/dataset.py (loader genérico +
                  TUMRGBDLoader/tum_camera/read_tum_trajectory/associate_by_timestamp
                  + EuRoCLoader/euroc_camera/read_euroc_groundtruth (parser
-                 sensor.yaml sin PyYAML, GT cuerpo→cámara), v0.45)
+                 sensor.yaml sin PyYAML, GT cuerpo→cámara), v0.45
+                 + read_euroc_imu/euroc_imu_params/read_euroc_state (IMU crudo,
+                 ruidos del sensor.yaml y GT de ESTADO con v y sesgos, v1.1))
 examples/        01 (2D-2D didáctico autocontenido), 02 (PnP+BA),
                  03 (grafo de poses simulado), 04 (corredor: bucle on/off),
                  05 (datos reales TUM RGB-D, v0.45), 06 (EuRoC MAV, v0.45)
@@ -887,6 +898,28 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     (perezosos, se importan de sus módulos): `import vslam` no arrastra GPU ni
     C++ — verificado. Lo no listado puede cambiar entre minors.
 
+47. **La preintegración se valida con el GT de ESTADO — y la gemela GTSAM no
+    es bit-exacta porque es OTRA formulación** (v1.1 hito 1,
+    imu_preintegration.py). (a) `predict()` es un REORDENAMIENTO EXACTO del
+    dead-reckoning: la gravedad (g·Δt, ½·g·Δt²) y el arrastre de v_i salen de
+    la suma telescópica de la integración — no hay aproximación; el test lo
+    exige a 1e-12 y el residuo del futuro factor es 0 en el estado verdadero.
+    Lo aproximado es SOLO la corrección de sesgo (1er orden: error medido
+    2e-5 con |δb|=1e-3, crece ×100 al ×10 — 2º orden como debe). (b) La wheel
+    de GTSAM (conda 4.2.2) usa preintegración TANGENTE, no la de variedad del
+    paper de Forster: la equivalencia es de 2º orden (7e-5 rad / 1.2e-4 m tras
+    2 s con |Δv|~20 m/s), NO bit-exacta — el test usa tolerancias con ~10× de
+    margen sobre lo medido, no igualdad. Tres trampas de su API documentadas:
+    `preintMeasCov` ordena (θ, p, v) (nosotros [φ, v, p]),
+    `ConstantBias(ACELERÓMETRO, gyro)` — al revés de lo natural — e
+    `integrateMeasurement(acc, omega, dt)` también. (c) EuRoC
+    `state_groundtruth_estimate0` trae velocidades y SESGOS → el
+    dead-reckoning por ventanas es el test de CONVENCIONES perfecto antes de
+    meter nada al grafo: 1 s de IMU real (V1_01) predice rot 0.33° / pos
+    4.4 cm (medianas; p90 7.7 cm). Un signo de gravedad mal daría ½·g·t² ≈
+    4.9 m; un frame mal, metros — este humo convierte "¿están bien q_RS,
+    fuerza específica y g = −z?" en un número.
+
 ---
 
 ## 6. v0.4b — CERRADA (plan original abajo, como referencia de lo hecho)
@@ -1178,6 +1211,46 @@ Resumen operativo de lo inmediato:
   CONTRIBUTING, tabla de benchmarks en el README. Pendiente MANUAL de Ariel:
   `python -m build` + `twine upload` (PyPI), tag `v1.0.0` + GitHub Release,
   video demo (opcional).
+- **v1.1 — VISUAL-INERCIAL (VIO)** (EN PROGRESO — decisión de Ariel, jul 2026).
+  Contexto: comparando contra ORB-SLAM3, el gap real del repo no es el ATE en
+  secuencias moderadas (factor 2-3×) sino el SOBRE DE OPERACIÓN — y la palanca
+  número uno es el IMU (las lecciones 28-29 ya lo pedían: los fallos de
+  movimiento agresivo no eran de umbral). docs/04 lo dejaba para post-1.0 con
+  "GTSAM nos deja la puerta abierta". Es también el hito técnico que refuerza
+  el posicionamiento "plataforma VIO" del posible paper (SoftwareX).
+  - ✅ HITO 1 — preintegración de referencia (lección 47):
+    `vslam/backend/imu_preintegration.py` (NumPy, Forster TRO 2017: ΔR/Δv/Δp,
+    jacobianos de sesgo, covarianza 9×9 [φ,v,p], `residual` del futuro factor
+    documentado, `preintegrate_between` por intervalo de frames) + lectores
+    `read_euroc_imu`/`euroc_imu_params`/`read_euroc_state` (io/dataset.py).
+    VERIFICADO (tests/test_imu_preintegration.py, 4 tests; en el job extras
+    del CI): predict == dead-reckoning exacto (1e-13); sesgo a 1er orden;
+    equivalencia GTSAM (deltas + predict + covarianza permutada); V1_01 real:
+    rot 0.33° / pos 4.4 cm mediana en ventanas de 1 s contra el GT de estado.
+  - ⏳ HITO 2 — init visual-inercial: estimar gravedad (→ actitud inicial),
+    velocidad y sesgo de gyro. EuRoC arranca ~quieto: detector de ventana
+    estática (varianza del gyro) para b_g y dirección de g; criterio medible:
+    dirección de g < 1° del GT, b_g dentro de ~2σ del GT en las 5 secuencias
+    V1/V2/MH que tengamos. (La alineación dinámica tipo Martinelli/ORB-SLAM3
+    se anota como alternativa si el estático no basta en MH_*.)
+  - ⏳ HITO 3 — el factor IMU en el grafo rápido: estados de velocidad+sesgo
+    por KF, `ImuFactor`/`CombinedImuFactor` (o Between de sesgo con random
+    walk) en gtsam_isam2; la conversión mundo z-arriba (gravedad) ↔ frame
+    óptico del tracker por CONJUGACIÓN, solo en un adaptador (patrón de la
+    lección 43 — el núcleo no cambia de convención). DECISIÓN PENDIENTE con
+    Ariel: ¿BA visual-inercial de referencia en NumPy (didáctico completo,
+    caro) o la referencia queda en preintegración+residual (ya escrita) y el
+    grafo VI vive solo en la gemela GTSAM? Precedente: regla 3 (perfilar
+    antes de escribir) sugiere lo segundo para empezar.
+  - ⏳ HITO 4 — predicción IMU en el frontend: el prior del matching guiado
+    (hoy velocidad constante, lección 24) desde la preintegración del gap
+    entre frames — la palanca directa contra rotación rápida/blur, medible
+    como inliers del guiado y frames perdidos en V1_02/V1_03.
+  - ⏳ HITO 5 — CRITERIO de v1.1 (calibrar al medir el baseline): paridad en
+    V1_01 (≤ 6.9 cm) y al menos DOS secuencias EuRoC que el estéreo puro de
+    v0.6 no logra (candidatas: V1_02_medium, V1_03_difficult, MH_04) con ATE
+    métrico < 10 cm y sin colapso. PRIMER PASO del hito: correr el baseline
+    estéreo v0.6 en V1_02/V1_03/MH_* para tener los números "sin IMU".
 
 ---
 
@@ -1211,8 +1284,9 @@ Resumen operativo de lo inmediato:
    todos verdes esperados (gtsam/C++ se saltan limpio si falta la dep;
    los de torch/gsplat requieren el env `vslam` o Docker).
 5. Correr ejemplos 02 y 04 y comparar contra los números de referencia.
-6. v1.0 COMMITEADA. Pendientes manuales de release en §3.5 (PyPI, tag,
-   video). Siguiente trabajo: deuda de §8 y restantes de §7 (EuRoC
-   MH_*/V2_*, --fast en examples/06, benchmark completo con learned) —
-   salvo que Ariel indique otra cosa. Recordar: usar el env conda `vslam`
-   (§2), NO el Python del sistema.
+6. Trabajo EN CURSO: **v1.1 (VIO)** — hito 1 (preintegración, lección 47)
+   HECHO; seguir con el hito 2 del plan de §7 (y su primer paso: baseline
+   estéreo v0.6 en V1_02/V1_03/MH_*). v1.0: pendientes manuales de release
+   en §3.5 (PyPI, tag, video). Deuda de §8 y restantes de §7 (EuRoC MH_*/
+   V2_*, --fast en examples/06, benchmark con learned) siguen abiertos.
+   Recordar: usar el env conda `vslam` (§2), NO el Python del sistema.

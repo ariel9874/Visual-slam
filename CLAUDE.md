@@ -28,7 +28,24 @@ DEBE mantenerse actualizado al cerrar cada etapa.
   versionados). Ofrecer commit al cerrar cada etapa. `data/` y `output/` se
   regeneran con scripts (están en .gitignore).
 
-## Estado actual: v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
+## Estado actual: v1.1 (VIO) EN PROGRESO — hito 1 hecho; v1.0 pendiente de publicación
+
+**v1.1 (decisión de Ariel, jul 2026)**: visual-inercial — la palanca del sobre
+de operación vs ORB-SLAM3 (lecciones 28-29). HITO 1 HECHO (lección 47):
+`vslam/backend/imu_preintegration.py` (referencia NumPy de Forster: ΔR/Δv/Δp,
+jacobianos de sesgo, covarianza 9×9 [φ,v,p], residuo del factor documentado) +
+`read_euroc_imu`/`euroc_imu_params`/`read_euroc_state` en io/dataset.py.
+Verificado: predict == dead-reckoning EXACTO (1e-13); sesgo a 1er orden;
+equivalencia GTSAM — OJO: la wheel conda usa preintegración TANGENTE (acuerdo
+de 2º orden, no bit-exacto), `preintMeasCov` ordena (θ,p,v) y
+`ConstantBias(acc, gyro)`/`integrateMeasurement(acc, omega, dt)` van con el
+ACELERÓMETRO primero —; dead-reckoning REAL V1_01: rot 0.33°/pos 4.4 cm
+mediana a 1 s (valida frames/signos: un error daría metros).
+tests/test_imu_preintegration.py (4, guards gtsam/dataset) + job extras del
+CI. Siguiente: hito 2 (init VI: gravedad/sesgos por ventana estática); antes,
+baseline estéreo v0.6 en V1_02/V1_03/MH_*. Plan completo en docs/05 §7.
+
+## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 
 **v1.0**: pyproject.toml actualizado (`vslam-edu` 1.0.0, deps numpy<2 +
 opencv, extras deep/gtsam/dense, license MIT), `__version__` 1.0.0 (import

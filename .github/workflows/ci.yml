@@ -96,7 +96,7 @@ jobs:
         # el hilo de mapeo (usa isam2 y vslam_cpp al estar disponibles).
         run: |
           set -e
-          for t in test_gtsam_ba test_isam2_ba test_guided_match_cpp test_async_mapping; do
+          for t in test_gtsam_ba test_isam2_ba test_guided_match_cpp test_async_mapping test_imu_preintegration; do
             echo "==== $t ===="
             python "tests/$t.py"
           done
