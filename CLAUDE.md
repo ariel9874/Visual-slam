@@ -106,10 +106,16 @@ nada; el 194 cm/0.34 del conjunto es ARTEFACTO de concatenar sesiones en
 marcos independientes sin puente de bucle (Umeyama global las desalinea). La
 cura del prior de velocidad post-reset FALLÓ (v heredada=0: el IMU no
 encadena en tramos cortos). El VIO FUNCIONA en V1_03; la limitación es el
-ensamblado multi-sesión → cura REAL = Atlas/multi-mapa (fuera de v1.1,
-docs/04). Con resets, la métrica final-KF CONCATENADA engaña: mide el
-ensamblado, no el SLAM (diagnóstico por-sesión en examples/06). Cuadro 4×3
-en lección 52, desglose por-sesión en lección 53. Plan en §7.
+ensamblado multi-sesión. TRES curas de V1_03 FALSADAS (lecciones 53-54):
+prior de velocidad post-reset (v heredada=0), y el mini-Atlas por
+CONMUTACIÓN (empeora 4.5×: 882 cm, resets 4→8 — reactivar conmutando en el
+tramo caótico descarrila el tracking; REVERTIDO). El reconocimiento
+inter-sesión SÍ es posible (los bucles finales reconocieron la sesión 0),
+pero la vía correcta es Atlas por FUSIÓN (place recognition → Sim(3) →
+grafo esencial → BA de fusión, como ORB-SLAM3), un HITO DE v1.2 con diseño
+propio, no un parche. Con resets la métrica final-KF CONCATENADA engaña:
+mide el ensamblado, no el SLAM (diagnóstico por-sesión en examples/06).
+Cuadro 4×3 en lección 52. Plan en §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 

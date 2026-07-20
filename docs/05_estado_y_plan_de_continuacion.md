@@ -1133,6 +1133,34 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     mide el ensamblado inter-sesión, no la calidad del SLAM; el diagnóstico
     por-sesión es la lente correcta (queda en examples/06).
 
+54. **El mini-Atlas por CONMUTACIÓN empeora V1_03 4.5× — el Atlas correcto
+    FUNDE, no conmuta** (v1.1, tercer resultado negativo de V1_03; Ariel
+    pidió el mini-Atlas tras la 53). Implementado: los mapas SOBREVIVEN al
+    reset en un atlas (mapper + kf_db + BoW + puntos 3D, no solo poses) y, al
+    re-arrancar (init) o perderse (coast), la vista se RELOCALIZA contra los
+    mapas archivados; si reconoce uno con ≥50 inliers PnP, lo REACTIVA —
+    conmuta el activo por el viejo con la pose en SU marco (re-anclaje de
+    marco). MEDIDO en V1_03 (LightGlue+IMU):
+    | | ATE | escala | resets | perdidos | sesión dominante |
+    |---|---|---|---|---|---|
+    | sin atlas | 194 | 0.34 | 4 | 629 | 188 KFs, 0.997 |
+    | mini-Atlas | **882** | **0.074** | **8** | 1185 | 86 KFs, **0.088** |
+    Disparó 4 reactivaciones pero DESESTABILIZÓ: resets 4→8, la sesión
+    dominante nace tarde (frame 1435 vs 632) y COLAPSADA (escala 0.088). Por
+    qué: la reactivación por CONMUTACIÓN es frágil — en el tramo caótico el
+    matching es poco fiable, una reactivación prematura/falsa conmuta a un
+    marco equivocado, rompe el tracking → más resets → círculo vicioso; y
+    conmutar (adoptar el mapa viejo, tirar el nuevo) pierde progreso. Dato
+    REVELADOR: los cierres de bucle finales (frames 1987-2076) SÍ
+    reconocieron la sesión 0 (KFs 0/90/135) desde la parte final — el
+    reconocimiento inter-sesión ES posible, pero por la vía del CIERRE DE
+    BUCLE (grafo esencial + BA de fusión), no la conmutación abrupta. **El
+    Atlas real de ORB-SLAM3 FUNDE mapas (place recognition → alinear Sim(3)
+    → grafo esencial → BA de fusión), conservando ambos; la conmutación
+    simple es un callejón MEDIDO.** REVERTIDO. V1_03 se cierra como límite de
+    ENSAMBLADO: el VIO funciona (sesión dominante 15.6 cm), y el Atlas por
+    FUSIÓN es un hito propio de v1.2 (§7), no un parche de v1.1.
+
 ---
 
 ## 6. v0.4b — CERRADA (plan original abajo, como referencia de lo hecho)
@@ -1580,7 +1608,7 @@ Resumen operativo de lo inmediato:
 | ~~Licencia sin decidir~~ SALDADA (v0.9) | MIT (decisión de Ariel); deps permisivas (GTSAM es BSD-3) |
 | iSAM2 síncrono NO es bit-determinista en secuencias DIFÍCILES | Lección 51: control V1_02 sin IMU dio 142/486 y 72.8/381 entre corridas (V1_01 sí es bit-idéntico, lección 50). Sospechoso: el RANSAC de `cv2.solvePnPRansac` sin semilla — invisible cuando el tracking es sano (mismo inlier-set), aflora al límite. Fijar semilla del RANSAC para recuperar el determinismo como herramienta de regresión también en EuRoC |
 | ~~V1_02 colapsa~~ SALDADA (lección 52) | El frontend aprendido (SuperPoint+LightGlue, `--detector superpoint --matcher lightglue`) la RESCATA: 363.8→5.5 cm sin IMU / 3.9 con IMU, escala 1.00, perdidos ~486→8. IMU y frontend ortogonales; el IMU solo ayuda sobre frontend sano (con ORB dañaba por el grafo+resets) |
-| V1_03 sigue LÍMITE — pero es ATLAS, no el IMU (lección 53 corrige la 52) | Diagnóstico dirigido: cada sesión VIO de V1_03 es MÉTRICA (sesión 0 escala 0.945; sesión 4, 188 KFs, 15.6 cm/escala 0.997). El 194 cm/0.34 del conjunto es ARTEFACTO de concatenar sesiones en marcos independientes sin puente de bucle (Umeyama global las desalinea). La cura del prior de velocidad post-reset FALLÓ (v heredada=0: el IMU no encadena en tramos cortos). CURA real = ATLAS/multi-mapa (fusionar sesiones por reconocimiento de lugar entre ellas), fuera de v1.0/v1.1 (docs/04). El VIO funciona; falta re-ensamblar las piezas tras el tramo irrecuperable (~frames 135-631, iluminación+movimiento extremos) |
+| V1_03 = límite de ENSAMBLADO; Atlas por FUSIÓN es hito de v1.2 (lecciones 53-54) | Cada sesión VIO de V1_03 es MÉTRICA (sesión dominante 188 KFs, 15.6 cm/escala 0.997); el 194 cm/0.34 es ARTEFACTO de concatenar sesiones en marcos independientes. TRES curas falsadas: prior de velocidad post-reset (v heredada=0), y el mini-Atlas por CONMUTACIÓN (empeora 4.5×: 882 cm, resets 4→8 — reactivar por conmutación en tramo caótico descarrila; lección 54). El VIO funciona; la cura correcta es Atlas por FUSIÓN (place recognition → Sim(3) → grafo esencial → BA de fusión, como ORB-SLAM3), un hito de v1.2 con diseño propio, NO un parche |
 
 1. Leer este documento completo y el README.
 2. `git status` — verificar si ya hubo commits (si no: recordar ofrecerlo).
