@@ -89,10 +89,20 @@ suave-agresivo (V1_01) pero V1_02/V1_03 NO se rescatan — es un límite de
 FRONTEND (blur del dron rompe ORB: perdidos IDÉNTICOS con/sin prior IMU),
 no de backend inercial. El grafo IMU + reset colapsa la escala ACTIVAMENTE
 (0.11 vs 0.89 del control sin IMU; 2 fallos de update).** Discriminadores
-en lección 51. DECISIÓN DE RUMBO pendiente de Ariel (§7): (A) atacar el
-frontend bajo blur — LightGlue/deblur, la única palanca medida para
-V1_02/V1_03; (B) cerrar v1.1 con el VIO validado en V1_01 + este límite
-documentado. Plan en §7.
+en lección 51. RUMBO (A) elegido por Ariel — FRONTEND APRENDIDO (lección
+52): SuperPoint+LightGlue (ya integrado desde la 29, `--detector superpoint
+--matcher lightglue`, cero código nuevo) **RESCATA V1_02: perdidos ~486→8,
+escala 0.18→1.00, 5.5 cm SIN IMU / 3.9 cm CON IMU** — confirma el
+diagnóstico de la 51 (el cuello era el frontend). Hallazgo: IMU y frontend
+son palancas ORTOGONALES (prior/movimiento vs features/blur) y **el IMU
+solo AYUDA sobre un frontend SANO** (con ORB dañaba: 539/escala 0.11 por el
+grafo IMU+resets; con LightGlue 0 resets → 3.9/escala 1.00 — el reset era
+el veneno, no el IMU). **CRITERIO de v1.1 CUMPLIDO en 2/3: V1_01 VIO 5.0
+cm, V1_02 LightGlue+IMU 3.9 cm** (< 10 cm, escala 1.00, sin colapso). V1_03
+sigue LÍMITE: LightGlue+IMU la mejora (perdidos 1810→629, resets 14→4) pero
+los 4 resets residuales colapsan la escala (0.34) — tramos irrecuperables;
+cura candidata = atacar el colapso de escala del grafo IMU tras reset
+(deuda §8, hito futuro). Cuadro completo 4×3 en lección 52. Plan en §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 
