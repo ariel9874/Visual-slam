@@ -52,9 +52,20 @@ vicon_room1.zip: trae bag+zip ASL). HITO 2 HECHO (lección 48):
 umbrales laxos + consistencia entre mitades; b_g err 1.9-2.3e-3 rad/s en
 las 3 V1; dir(g) cruda ≤ 2.6° — entrelazada con b_a, no observable en
 reposo — y ≤ 0.63° con b_a del GT; yaw no observable → R_wb con yaw=0 →
-el grafo VI tendrá gauge de 4 gdl). tests/test_imu_init.py (4). Siguiente:
-hito 3 (factor IMU en iSAM2; decisión pendiente: ¿BA VI de referencia
-NumPy o solo gemela GTSAM?). Plan completo en docs/05 §7.
+el grafo VI tendrá gauge de 4 gdl). tests/test_imu_init.py (4). HITO 3a
+HECHO (lección 49; decisión de Ariel: el grafo VI vive SOLO en la gemela
+GTSAM): modo VI de `ISAM2LocalBA` — `configure_imu` + V/B por KF +
+CombinedImuFactor (poses de cámara, extrínseco por body_P_sensor), gauge
+VI = 1 prior, params propios (relinearizeSkip=1 + Dogleg; GN puro no movía
+la escala), re-anclaje tras reset. Test nulo/observable: escala corrupta
+1.334 sin IMU → 0.993 con IMU; b_a desde cero a 0.008. De camino: BUG
+LATENTE de v0.5 cazado (prior fantasma de re-siembra — _session_pids
+registraba pids PENDIENTES; solo el IMU, primer sensor que discrepa del
+mapa, lo destapó) y hallazgo de regresión: fr1_desk --fast tiene varianza
+2.6↔400 cm entre corridas (el 2.5 de lección 38 era UNA muestra; ancla
+--fast = fr2_xyz, en paridad 1.5/1.4). Siguiente: hito 3b — cablear
+tracker/driver (--imu en examples/06, g_map desde init estática,
+T_cam_imu de EuRoC) y medir V1_01. Plan completo en docs/05 §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 

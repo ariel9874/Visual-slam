@@ -177,7 +177,10 @@ python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg2_xyz --dept
 python tests/test_rgbd.py                 # 5 tests (Umeyama rígido, init, bucle SE3,
                                           #          BA con u_R nulo/observable, loader)
 # --fast --depth (stack rápido iSAM2 con FACTOR ESTÉREO GTSAM, lección 38):
-#   fr2_xyz 1.4 cm / fr1_desk 2.5 cm métrico — paridad con NumPy, a 30+ fps.
+#   fr2_xyz 1.4-1.5 cm métrico — paridad con NumPy, a 30+ fps. Es el ANCLA de
+#   regresión del stack rápido. OJO: fr1_desk --fast tiene varianza 2.6↔400 cm
+#   entre corridas (lección 49, deuda §8) — el 2.5 histórico era una muestra;
+#   para fr1_desk la referencia fiable es la ruta NumPy (2.8 cm).
 python examples/05_tum_rgbd.py --root data/tum/rgbd_dataset_freiburg2_xyz --depth --fast
 
 # ESTÉREO REAL (v0.6 hito 3, EuRoC): cam0+cam1, disparidad SGBM → profundidad
@@ -204,6 +207,11 @@ python tests/test_imu_preintegration.py   # 4 (exactitud, sesgo 1er orden, gtsam
 #   Esperado (las 3 V1 vs GT): b_g err ≤ 2.3e-3 rad/s; dir(g) cruda ≤ 2.6
 #   grados (b_a manda, lección 48); con b_a del GT ≤ 0.63 grados.
 python tests/test_imu_init.py             # 4 (sintético, sin-reposo, degenerados, EuRoC)
+
+# MODO VI DE iSAM2 (v1.1 hito 3a, requiere gtsam): el par nulo/observable.
+#   Esperado: escala corrupta 1.3 → sin IMU ~1.33 (gauge), con IMU ~0.99;
+#   b_g err ~5e-4; b_a err ~0.01 (desde cero); reset re-anclado, 0 fallos.
+python tests/test_imu_isam2.py            # 3 (escala, sesgos, reset)
 ```
 
 Notas: el modo `--no-ba` del ejemplo 04 da ~200 cm — es un modo de fallo
@@ -949,6 +957,36 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     3: el grafo VI tiene gauge de 4 gdl (posición + yaw), no los 6/7 del
     visual puro — los priors deben reflejarlo.
 
+49. **El primer sensor que DISCREPA del mapa desenmascara los priors
+    fantasma — y una referencia de una sola corrida puede ser una muestra
+    afortunada** (v1.1 hito 3a, gtsam_isam2.py). (a) EL BUG (latente desde
+    v0.5): `_session_pids` se poblaba al VER un pid — incluidos los que
+    esperaban en pendientes — así que la 2ª obs de cada punto que cruzaba
+    llamadas parecía "re-siembra de otra época" y recibía un
+    PriorFactorPoint3 (σ=2 cm) a su posición del mapper. La visión pura
+    NUNCA lo notó (dos versiones enteras): el prior es consistente con la
+    solución visual — mismo gauge — y solo estorba cuando otro sensor
+    discrepa del mapa. El test nulo/observable del modo VI lo cazó: la
+    escala corrupta ×1.3 quedaba CLAVADA en 1.25 por 28 priors fantasma
+    (batch LM sobre el grafo espiado de la clase: mínimo en 1.244 — no era
+    convergencia, era el CONTENIDO del grafo). Fix: un pid entra a
+    _session_pids solo al INSERTARSE. Con él: escala 1.334→0.993, b_g err
+    4.7e-4, b_a err 0.008 (desde 0 — lo que la init estática no ve, lección
+    48, el grafo lo recupera). (b) LA REGRESIÓN A/B del fix (fr1_desk
+    --depth --fast, la secuencia biestable): fix 4.6/4.7/18.9 cm; viejo
+    400.8 (¡colapso, escala 0.029!) / 2.6. Moraleja doble: el "2.5 cm" de
+    la lección 38 era UNA corrida de una distribución con varianza 2.6↔400
+    (--fast = iSAM2 + hilo async: no determinista) — el ancla de regresión
+    del stack rápido es fr2_xyz (estable: 1.5 vs 1.4, paridad ✓) y fr1_desk
+    --fast pasa a deuda §8; y las referencias de configs no deterministas
+    deben medirse con VARIAS corridas antes de fijarse como número. (c) De
+    camino, dos verdades de iSAM2 en modo VI: con el default
+    relinearizeSkip=10 el grafo se queda linealizado en el valor inicial
+    (la escala ni se movía) → relinealizar SIEMPRE + umbral 0.05 + DOGLEG
+    (GN puro no navega correcciones del 30%); y el gauge VI es 1 prior de
+    pose (el 2º del modo visual congela la escala del valor inicial y pelea
+    con el IMU). Solo en VI: la sintonía visual medida en v0.5 no se toca.
+
 ---
 
 ## 6. v0.4b — CERRADA (plan original abajo, como referencia de lo hecho)
@@ -1268,15 +1306,34 @@ Resumen operativo de lo inmediato:
     detectadas: V1_01 [0.5, 2.5] s (salta la manipulación inicial),
     V1_02/V1_03 [0, 2] s. (La alineación dinámica tipo Martinelli queda
     como alternativa anotada si alguna secuencia MH_* arranca en vuelo.)
-  - ⏳ HITO 3 — el factor IMU en el grafo rápido: estados de velocidad+sesgo
-    por KF, `ImuFactor`/`CombinedImuFactor` (o Between de sesgo con random
-    walk) en gtsam_isam2; la conversión mundo z-arriba (gravedad) ↔ frame
-    óptico del tracker por CONJUGACIÓN, solo en un adaptador (patrón de la
-    lección 43 — el núcleo no cambia de convención). DECISIÓN PENDIENTE con
-    Ariel: ¿BA visual-inercial de referencia en NumPy (didáctico completo,
-    caro) o la referencia queda en preintegración+residual (ya escrita) y el
-    grafo VI vive solo en la gemela GTSAM? Precedente: regla 3 (perfilar
-    antes de escribir) sugiere lo segundo para empezar.
+  - 🔶 HITO 3 — el factor IMU en el grafo rápido. DECISIÓN TOMADA (Ariel,
+    jul 2026): **el grafo VI vive SOLO en la gemela GTSAM** (opción B) — la
+    referencia educativa queda en la preintegración + residuo del hito 1
+    (documentados y testeados); el solver es CombinedImuFactor/iSAM2 (que
+    además ES la implementación de referencia del paper de Forster). El VIO
+    es capacidad del stack --fast; el tracker NumPy de default sigue siendo
+    visual puro — decisión consciente, no deuda olvidada.
+    ✅ 3a — BACKEND (lección 49): modo VI de `ISAM2LocalBA` opt-in vía
+    `configure_imu(noise, gravity_map, T_cam_imu, sesgos/velocidad de la
+    init estática)`; `process_keyframe(..., imu_data=(ts,gyro,accel))`
+    preintegra el segmento con el sesgo VIGENTE y añade V(kf)/B(kf) +
+    CombinedImuFactor; las poses SIGUEN siendo de cámara (extrínseco por
+    `body_P_sensor`); gauge VI = 1 prior de pose; params iSAM2 propios del
+    modo (relinearizeSkip=1, umbral 0.05, Dogleg — GN puro no movía la
+    escala) + 2 updates extra por KF; la cadena re-ancla tras reset (V/B
+    con prior del último estimado; el sesgo es físico y sobrevive).
+    MEDIDO (tests/test_imu_isam2.py, 3 tests, en CI extras): escala
+    corrupta ×1.3 → sin IMU 1.334 (gauge), con IMU 0.993; b_g err 4.7e-4
+    rad/s; b_a err 0.008 m/s² DESDE CERO; reset re-anclado sin fallos. De
+    camino cayó el bug del prior fantasma de re-siembra (lección 49;
+    regresión: fr2_xyz --fast 1.5 vs 1.4 ✓; fr1_desk --fast resultó tener
+    varianza 2.6↔400 cm — a deuda §8).
+    ⏳ 3b — CABLEADO tracker/driver: alimentar segmentos IMU por keyframe
+    desde examples/06 (--imu), gravedad al frame del MAPA desde la init
+    estática (g_map = R_cam_body·g_body con el mapa anclado en cam0),
+    T_cam_imu = inv(T_BS de cam0) de EuRoC; reset del bucle de cierre ya
+    cubierto por el re-anclaje. Medir V1_01 (paridad ≤6.9) antes de tocar
+    V1_02/V1_03 (hito 4-5).
   - ⏳ HITO 4 — predicción IMU en el frontend: el prior del matching guiado
     (hoy velocidad constante, lección 24) desde la preintegración del gap
     entre frames — la palanca directa contra rotación rápida/blur, medible
@@ -1318,6 +1375,7 @@ Resumen operativo de lo inmediato:
 | Modo --no-ba del corredor colapsa (~200 cm) | Conocido; no es objetivo |
 | ~~Adaptadores GTSAM sin residuo de profundidad~~ SALDADA (v0.6, lección 38) | gtsam_ba y gtsam_isam2 usan `GenericStereoFactor3D` + `Cal3_S2Stereo` cuando llega u_R. `--fast --depth` validado: fr2_xyz 1.4 / fr1_desk 2.5 cm, paridad con NumPy |
 | examples/01 y tracker comparten conceptos duplicados | Deliberado (didáctica); no unificar |
+| fr1_desk `--fast` tiene varianza 2.6↔400 cm entre corridas | Descubierto en el A/B de la lección 49 (n=5; iSAM2+hilo async no determinista sobre la secuencia biestable). El "2.5" de lección 38 era una muestra. Ancla de regresión --fast: fr2_xyz (estable). Investigar (semillas/iteraciones) fuera del camino crítico de v1.1 |
 | ~~Licencia sin decidir~~ SALDADA (v0.9) | MIT (decisión de Ariel); deps permisivas (GTSAM es BSD-3) |
 
 ---
