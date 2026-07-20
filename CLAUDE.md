@@ -99,10 +99,17 @@ solo AYUDA sobre un frontend SANO** (con ORB dañaba: 539/escala 0.11 por el
 grafo IMU+resets; con LightGlue 0 resets → 3.9/escala 1.00 — el reset era
 el veneno, no el IMU). **CRITERIO de v1.1 CUMPLIDO en 2/3: V1_01 VIO 5.0
 cm, V1_02 LightGlue+IMU 3.9 cm** (< 10 cm, escala 1.00, sin colapso). V1_03
-sigue LÍMITE: LightGlue+IMU la mejora (perdidos 1810→629, resets 14→4) pero
-los 4 resets residuales colapsan la escala (0.34) — tramos irrecuperables;
-cura candidata = atacar el colapso de escala del grafo IMU tras reset
-(deuda §8, hito futuro). Cuadro completo 4×3 en lección 52. Plan en §7.
+sigue LÍMITE pero la CAUSA es ATLAS, no el IMU (lección 53, diagnóstico
+dirigido tras 2 hipótesis falsadas): CADA sesión VIO de V1_03 es MÉTRICA
+(sesión dominante 188 KFs, 15.6 cm, escala 0.997) — el grafo IMU NO colapsa
+nada; el 194 cm/0.34 del conjunto es ARTEFACTO de concatenar sesiones en
+marcos independientes sin puente de bucle (Umeyama global las desalinea). La
+cura del prior de velocidad post-reset FALLÓ (v heredada=0: el IMU no
+encadena en tramos cortos). El VIO FUNCIONA en V1_03; la limitación es el
+ensamblado multi-sesión → cura REAL = Atlas/multi-mapa (fuera de v1.1,
+docs/04). Con resets, la métrica final-KF CONCATENADA engaña: mide el
+ensamblado, no el SLAM (diagnóstico por-sesión en examples/06). Cuadro 4×3
+en lección 52, desglose por-sesión en lección 53. Plan en §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 

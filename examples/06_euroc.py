@@ -182,6 +182,29 @@ def main() -> int:
         print(f"ATE FINAL-KF ({unit}): {100*mk['rmse']:.1f} cm rmse | "
               f"escala similitud {sk:.3f} | {ok2.sum()} KFs")
 
+    # DIAGNÓSTICO VI (v1.1): escala POR SESIÓN (entre resets). Localiza si el
+    # colapso de escala del conjunto nace en una sesión concreta del grafo VI
+    # o en la CONCATENACIÓN de sesiones archivadas con escalas inconsistentes.
+    if tracker.reset_events:
+        bounds = [0] + list(tracker.reset_events) + [10 ** 9]
+        print(f"    -- escala por sesion ({len(bounds)-1} sesiones, "
+              f"resets en {list(tracker.reset_events)}) --")
+        for si in range(len(bounds) - 1):
+            lo, hi = bounds[si], bounds[si + 1]
+            seg = [(k, T) for k, T in kf_traj if lo <= k < hi]
+            if len(seg) < 3:
+                print(f"    sesion {si}: {len(seg)} KFs (pocos)")
+                continue
+            seg_ts = np.array([est_ts[k] for k, _ in seg])
+            seg_pos = np.array([T[:3, 3] for _, T in seg])
+            aa = associate_by_timestamp(seg_ts, gt_ts, max_dt=0.05)
+            okk = aa >= 0
+            if okk.sum() >= 3:
+                ms = ate(seg_pos[okk], gt_pos[aa[okk]], with_scale=True)
+                print(f"    sesion {si} (KF {seg[0][0]}-{seg[-1][0]}, "
+                      f"{okk.sum()} KFs): ATE-sim {100*ms['rmse']:.1f} cm | "
+                      f"escala {ms['scale']:.3f}")
+
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     np.savetxt(out / "trajectory_est.txt", np.column_stack([est_ts, est_pos]), fmt="%.6f")
     print(f"trayectoria: {out / 'trajectory_est.txt'}")

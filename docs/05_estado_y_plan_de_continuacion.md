@@ -1095,7 +1095,43 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     resets residuales / el colapso de escala del grafo IMU tras reset
     (deuda §8), un hito futuro.** Los "3 fallos de update" en V1_02
     LightGlue+IMU (sin resets) dicen que el grafo VI aún tiene roce fino,
-    absorbido por la pose del PnP; anotado.
+    absorbido por la pose del PnP; anotado. (OJO: la atribución de V1_03 al
+    "colapso de escala del grafo IMU" la CORRIGE la lección 53.)
+
+53. **El "colapso de escala" de V1_03 NO era del grafo IMU — cada sesión
+    VIO es MÉTRICA; el 194 cm es un ARTEFACTO de concatenar sesiones sin
+    Atlas** (v1.1, diagnóstico dirigido de V1_03 tras dos hipótesis
+    falsadas). Ariel pidió perseguir V1_03. PRIMERA cura (prior de VELOCIDAD
+    laxo tras reset, sospechando que clavar la v heredada con sigma 0.1
+    colapsaba la escala): FALLÓ — 194.1 cm idéntico. El diagnóstico de la
+    cura ya olía a falso: la v heredada era **0.00 m/s en los 4 resets** (no
+    una v grande-obsoleta) — el grafo IMU NUNCA encadena velocidad en V1_03
+    porque los tramos entre pérdidas son demasiado cortos (`_vel_last` solo
+    se actualiza con la cadena de CombinedImuFactor). SEGUNDO diagnóstico
+    (escala POR SESIÓN, entre resets, `examples/06` instrumentado):
+    | sesión | KFs | ATE-sim | escala |
+    |---|---|---|---|
+    | 0 (frames 0-135)    | 7   | 0.1 cm  | 0.945 |
+    | 1,2,3 (135-631)     | 1 c/u | — (tramo caótico) | — |
+    | 4 (frames 632-1929) | 188 | 15.6 cm | **0.997** |
+    **Cada sesión es métrica y sana** (0.945 / 0.997) — el grafo IMU no
+    colapsa NADA. El 194 cm / escala 0.341 del CONJUNTO es un artefacto de
+    Umeyama global sobre sesiones en marcos anclados INDEPENDIENTEMENTE (la
+    sesión 0 y la 4 no tienen puente de bucle entre sí — todos los cierres
+    de la 4 son intra-sesión): los pocos KFs de la sesión 0, en posición
+    globalmente incorrecta, arrastran la escala aparente. La ESTRUCTURA de
+    V1_03: arranque sano → **tramo intermedio IRRECUPERABLE** (~frames
+    135-631, ~25 s de iluminación+movimiento extremos: 3 micro-sesiones de
+    1 KF, el grueso de los 629 perdidos) → **recuperación y SLAM sano el
+    resto** (sesión 4, el 55% de la secuencia, 15.6 cm, escala 0.997). La
+    cura REAL no es tocar el IMU (sano) ni el prior de velocidad: es ATLAS /
+    multi-mapa (fusionar sesiones por reconocimiento de lugar ENTRE ellas),
+    deliberadamente fuera de v1.0/v1.1 (docs/04). **Reposiciona V1_03: el
+    VIO FUNCIONA (sesión dominante 15.6 cm / escala 0.997); la limitación es
+    el ensamblado multi-sesión, no el backend inercial.** Lección
+    metodológica: con resets, la métrica final-KF CONCATENADA es engañosa —
+    mide el ensamblado inter-sesión, no la calidad del SLAM; el diagnóstico
+    por-sesión es la lente correcta (queda en examples/06).
 
 ---
 
@@ -1544,7 +1580,7 @@ Resumen operativo de lo inmediato:
 | ~~Licencia sin decidir~~ SALDADA (v0.9) | MIT (decisión de Ariel); deps permisivas (GTSAM es BSD-3) |
 | iSAM2 síncrono NO es bit-determinista en secuencias DIFÍCILES | Lección 51: control V1_02 sin IMU dio 142/486 y 72.8/381 entre corridas (V1_01 sí es bit-idéntico, lección 50). Sospechoso: el RANSAC de `cv2.solvePnPRansac` sin semilla — invisible cuando el tracking es sano (mismo inlier-set), aflora al límite. Fijar semilla del RANSAC para recuperar el determinismo como herramienta de regresión también en EuRoC |
 | ~~V1_02 colapsa~~ SALDADA (lección 52) | El frontend aprendido (SuperPoint+LightGlue, `--detector superpoint --matcher lightglue`) la RESCATA: 363.8→5.5 cm sin IMU / 3.9 con IMU, escala 1.00, perdidos ~486→8. IMU y frontend ortogonales; el IMU solo ayuda sobre frontend sano (con ORB dañaba por el grafo+resets) |
-| V1_03 sigue LÍMITE tras LightGlue+IMU | Lección 52: mejora mucho (LightGlue+IMU: perdidos 1810→629, resets 14→4, 194 cm) pero los 4 resets residuales colapsan la escala del grafo IMU (0.34) — tramos IRRECUPERABLES (iluminación+movimiento extremos, >90 frames de coast). CURA candidata (hito futuro): que el grafo VI NO herede/re-inyecte escala-velocidad desbocada tras un reset (re-anclar la escala del mapa visual, gating del CombinedImuFactor post-reset) — el mecanismo de la lección 51, ahora aislado como el único residual |
+| V1_03 sigue LÍMITE — pero es ATLAS, no el IMU (lección 53 corrige la 52) | Diagnóstico dirigido: cada sesión VIO de V1_03 es MÉTRICA (sesión 0 escala 0.945; sesión 4, 188 KFs, 15.6 cm/escala 0.997). El 194 cm/0.34 del conjunto es ARTEFACTO de concatenar sesiones en marcos independientes sin puente de bucle (Umeyama global las desalinea). La cura del prior de velocidad post-reset FALLÓ (v heredada=0: el IMU no encadena en tramos cortos). CURA real = ATLAS/multi-mapa (fusionar sesiones por reconocimiento de lugar entre ellas), fuera de v1.0/v1.1 (docs/04). El VIO funciona; falta re-ensamblar las piezas tras el tramo irrecuperable (~frames 135-631, iluminación+movimiento extremos) |
 
 1. Leer este documento completo y el README.
 2. `git status` — verificar si ya hubo commits (si no: recordar ofrecerlo).
