@@ -58,8 +58,19 @@ def main() -> int:
     parser.add_argument("--health", type=int, default=45)
     parser.add_argument("--stereo", action="store_true",
                         help="estéreo métrico (cam0+cam1, disparidad → profundidad)")
+    parser.add_argument("--ba", default="numpy", choices=["numpy", "gtsam", "isam2"],
+                        help="backend del BA local (como en examples/05)")
+    parser.add_argument("--fast", action="store_true",
+                        help="stack de tiempo real de v0.5: iSAM2 + hilo de mapeo (gtsam)")
+    parser.add_argument("--imu", action="store_true",
+                        help="VIO (v1.1): factor IMU en iSAM2; requiere --stereo y "
+                             "--fast o --ba isam2")
     parser.add_argument("--max-frames", type=int, default=0)
     args = parser.parse_args()
+    ba_backend = "isam2" if args.fast else args.ba
+    if args.imu and not (args.stereo and ba_backend == "isam2"):
+        parser.error("--imu requiere --stereo y el backend isam2 "
+                     "(--fast o --ba isam2: el grafo VI vive en iSAM2)")
 
     root = Path(args.root)
     # ESTÉREO: la cámara es la izquierda RECTIFICADA (del rig); la profundidad
@@ -79,11 +90,45 @@ def main() -> int:
 
     tracker = PnPTracker(camera, extractor=create_extractor(args.detector),
                          matcher=create_matcher(args.matcher),
-                         local_window=args.window, local_ba=True, loop_closure=True)
+                         local_window=args.window, local_ba=True, loop_closure=True,
+                         ba_backend=ba_backend, async_mapping=args.fast)
     tracker.KF_HEALTH_INLIERS = args.health
     if args.stereo:
         tracker.STEREO_BF = loader.stereo_bf   # el MISMO bf que sintetiza u_R
         tracker.DEPTH_MAX = loader.max_depth   # escenas de sala: metros, no cm
+
+    # ── VIO (v1.1 hito 3b): el DRIVER es el dueño del reloj ──────────────────
+    # El tracker no conoce timestamps (deuda consciente): aquí se leen el IMU
+    # crudo y la init estática (lección 48), se lleva la gravedad al frame del
+    # MAPA (la izquierda RECTIFICADA del rig — el mapa ancla en ella) y se le
+    # da al tracker un PROVEEDOR de segmentos entre frame-ids.
+    ts_by_frame: dict = {}
+    if args.imu:
+        from vslam.backend.imu_init import static_imu_init
+        from vslam.backend.imu_preintegration import ImuNoiseParams
+        from vslam.io.dataset import euroc_imu_params, read_euroc_imu
+        imu_ts, imu_gyro, imu_accel = read_euroc_imu(root)
+        imu_noise = ImuNoiseParams(**euroc_imu_params(root))
+        vi_init = static_imu_init(imu_ts, imu_gyro, imu_accel)
+        T_cam_imu = loader.rig.T_cam_imu
+        g_map = T_cam_imu[:3, :3] @ vi_init.gravity_body
+        # (el dron sigue QUIETO entre la ventana estática y el frame 0: la
+        #  actitud de la ventana vale para el ancla del mapa)
+
+        def imu_segment(kf_a: int, kf_b: int):
+            """(ts, gyro, accel) del intervalo [t(kf_a), t(kf_b)): los cortes
+            en searchsorted hacen que segmentos consecutivos PARTICIONEN el
+            tiempo (sin huecos ni solapes; borde ≤ 5 ms a 200 Hz)."""
+            i0 = int(np.searchsorted(imu_ts, ts_by_frame[kf_a]))
+            i1 = int(np.searchsorted(imu_ts, ts_by_frame[kf_b]))
+            return imu_ts[i0:i1 + 1], imu_gyro[i0:i1], imu_accel[i0:i1]
+
+        tracker.enable_imu(imu_noise, g_map, T_cam_imu=T_cam_imu,
+                           init_gyro_bias=vi_init.gyro_bias,
+                           segment_provider=imu_segment)
+        print(f"    VIO: ventana estatica [{vi_init.t_start - imu_ts[0]:.1f}, "
+              f"{vi_init.t_end - imu_ts[0]:.1f}] s | b_g inicial "
+              f"{np.round(vi_init.gyro_bias, 4)} | |g_map| {np.linalg.norm(g_map):.2f}")
 
     est_ts, est_pos, states = [], [], []
     lost = 0
@@ -92,6 +137,8 @@ def main() -> int:
             break
         ts, gray = item[0], item[1]
         depth = item[2] if args.stereo else None
+        ts_by_frame[i] = ts              # ANTES de process_frame: el worker
+        #                                  puede pedir el segmento de este id
         if args.stereo:
             rect = gray                         # el loader ya entrega rectificado
         else:

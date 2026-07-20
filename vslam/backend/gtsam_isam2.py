@@ -227,6 +227,14 @@ class ISAM2LocalBA:
         self._imu_prev = cur
 
     @property
+    def imu_chain_tail(self) -> Optional[int]:
+        """Último KF encadenado de ESTA época (None si la cadena no arrancó).
+        El tracker pide al driver el segmento desde aquí hasta el KF nuevo —
+        si dos KFs coalescen en el worker, el segmento cubre ambos y la
+        cadena sigue siendo una partición del tiempo."""
+        return self._imu_prev
+
+    @property
     def last_velocity(self) -> np.ndarray:
         """Última velocidad estimada (frame del mapa) — prior de movimiento
         para el frontend (hito 4)."""

@@ -987,6 +987,27 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     pose (el 2º del modo visual congela la escala del valor inicial y pelea
     con el IMU). Solo en VI: la sintonía visual medida en v0.5 no se toca.
 
+50. **La varianza del stack rápido era el WORKER — el pipeline síncrono es
+    determinista AL BIT** (v1.1 hito 3b, el experimento discriminador).
+    V1_01 estéreo con `--ba isam2` SÍNCRONO: dos corridas sin IMU dan
+    EXACTAMENTE 4.6 cm/escala 1.006/106 perdidos/28 bucles — bit-idénticas
+    — y dos con IMU, exactamente 5.4/1.005/105/26. Tres consecuencias:
+    (a) TODA la varianza de `--fast` (mediana ~83 cm, rango 7-153) es el
+    scheduling del hilo de mapeo: en un dron rápido, el KF procesado TARDE
+    deja al tracking con mapa viejo justo cuando más lo necesita (en el
+    escritorio de TUM no dolía: fr2_xyz --fast estable — el sobre de
+    operación del ASYNC también tiene borde, no solo el del frontend).
+    (b) iSAM2 síncrono (4.6) SUPERA al NumPy (6.9) en V1_01 — el backend y
+    los factores están sanos; **el VIO síncrono (5.4, escala 1.005) queda
+    en PARIDAD: el criterio del hito 3 CUMPLIDO**. (c) El determinismo
+    bit-exacto del modo síncrono es una herramienta de regresión que no
+    sabíamos que teníamos (adiós tolerancias del ±20% AHÍ) — y explica por
+    qué fr1_desk --fast varía 2.6↔400 (lección 49) mientras el resto de la
+    suite es reproducible. Anotado sin perseguir: el online con IMU es
+    peor (59.5 vs 21.5) con final-KF igual — la métrica es final-KF
+    (lección 25). El frente async (prioridad de cola, o el prior IMU del
+    hito 4 que compensa el mapa viejo exactamente) va a deuda §8.
+
 ---
 
 ## 6. v0.4b — CERRADA (plan original abajo, como referencia de lo hecho)
@@ -1328,12 +1349,40 @@ Resumen operativo de lo inmediato:
     camino cayó el bug del prior fantasma de re-siembra (lección 49;
     regresión: fr2_xyz --fast 1.5 vs 1.4 ✓; fr1_desk --fast resultó tener
     varianza 2.6↔400 cm — a deuda §8).
-    ⏳ 3b — CABLEADO tracker/driver: alimentar segmentos IMU por keyframe
-    desde examples/06 (--imu), gravedad al frame del MAPA desde la init
-    estática (g_map = R_cam_body·g_body con el mapa anclado en cam0),
-    T_cam_imu = inv(T_BS de cam0) de EuRoC; reset del bucle de cierre ya
-    cubierto por el re-anclaje. Medir V1_01 (paridad ≤6.9) antes de tocar
-    V1_02/V1_03 (hito 4-5).
+    ✅ 3b — CABLEADO tracker/driver (el primer VIO del repo corre de punta
+    a punta): `PnPTracker.enable_imu(noise, g_map, T_cam_imu, sesgos,
+    segment_provider)` — el DRIVER es el dueño del reloj (Frame.timestamp
+    sigue siendo deuda consciente): entrega `segment_provider(kf_a, kf_b) →
+    (ts, gyro, accel)` y el tracker pide el segmento desde
+    `imu_chain_tail` del backend (KFs coalescidos en el worker quedan
+    cubiertos: el tiempo se particiona sin huecos). `_reset_map`
+    re-configura la gemela nueva HEREDANDO sesgo/velocidad (físicos, no
+    gauge). `EuRoCStereoRig.T_cam_imu` — OJO: lleva la rotación R1 de
+    rectificación (el frame del tracker es la izquierda RECTIFICADA, no
+    cam0). examples/06 gana `--fast` (deuda de v0.6 SALDADA) e `--imu`.
+    MEDIDO en V1_01 con **n=4 por brazo** (config no determinista — la
+    lección 49 exigía distribuciones, no muestras):
+    ```
+    numpy         6.9 cm / 34 perdidos (estable entre sesiones)
+    --fast        17.6 / 48.8 / 116.4 / 153.2 → mediana ~83 | perdidos 115-206 | escala 0.60-0.99
+    --fast --imu   7.3 / 22.0 / 24.2 / 61.7  → mediana ~23 | perdidos  45-126 | escala 0.90-1.00
+    ```
+    Lectura (n=4): (a) el IMU mejora TODOS los ejes de forma CONSISTENTE
+    — final-KF mediana ~83→~23 cm, perdidos ~151→~74, online ~79→~46,
+    escala 0.87→0.98 — y su mejor corrida (7.3 cm, escala 1.001) TOCA la
+    paridad NumPy: el techo es paridad, el enemigo es la VARIANZA. (b) El
+    stack --fast SIN IMU está ROTO en EuRoC (mediana ~83 vs 6.9 NumPy,
+    perdidos ~151 vs 34) — problema dominante, PRE-existente (nunca medido:
+    era deuda de v0.6) y ortogonal al IMU; la primera corrida (17.6) era
+    la MEJOR de cuatro — lección 49 otra vez. (c) La hipótesis de la
+    dilución del GBA visual queda EN PAUSA: la corrida VIO de 7.3 pasó por
+    el mismo GBA — la varianza domina, no el GBA. RESUELTO por el
+    experimento discriminador (`--ba isam2` síncrono, lección 50): el
+    culpable es el WORKER ASYNC; el pipeline síncrono es determinista AL
+    BIT y queda **isam2-sync 4.6 cm (¡mejor que NumPy 6.9!) / VIO-sync
+    5.4 cm, escala 1.005 — PARIDAD: hito 3 CERRADO**. El frente async va
+    a deuda §8; el hito 4 (prior IMU en el frontend) es además su
+    compensador natural.
   - ⏳ HITO 4 — predicción IMU en el frontend: el prior del matching guiado
     (hoy velocidad constante, lección 24) desde la preintegración del gap
     entre frames — la palanca directa contra rotación rápida/blur, medible
@@ -1376,6 +1425,7 @@ Resumen operativo de lo inmediato:
 | ~~Adaptadores GTSAM sin residuo de profundidad~~ SALDADA (v0.6, lección 38) | gtsam_ba y gtsam_isam2 usan `GenericStereoFactor3D` + `Cal3_S2Stereo` cuando llega u_R. `--fast --depth` validado: fr2_xyz 1.4 / fr1_desk 2.5 cm, paridad con NumPy |
 | examples/01 y tracker comparten conceptos duplicados | Deliberado (didáctica); no unificar |
 | fr1_desk `--fast` tiene varianza 2.6↔400 cm entre corridas | Descubierto en el A/B de la lección 49 (n=5; iSAM2+hilo async no determinista sobre la secuencia biestable). El "2.5" de lección 38 era una muestra. Ancla de regresión --fast: fr2_xyz (estable). Investigar (semillas/iteraciones) fuera del camino crítico de v1.1 |
+| El worker ASYNC colapsa en EuRoC (dron rápido) | Lección 50: --fast mediana ~83 cm en V1_01 (síncrono: 4.6 determinista al bit). El KF procesado tarde deja mapa viejo en vuelo rápido. Curas candidatas: prior IMU del hito 4 (compensa el mapa viejo), prioridad/presupuesto de cola. v1.1 mide su criterio en modo SÍNCRONO mientras tanto |
 | ~~Licencia sin decidir~~ SALDADA (v0.9) | MIT (decisión de Ariel); deps permisivas (GTSAM es BSD-3) |
 
 ---

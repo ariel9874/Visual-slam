@@ -63,9 +63,20 @@ LATENTE de v0.5 cazado (prior fantasma de re-siembra — _session_pids
 registraba pids PENDIENTES; solo el IMU, primer sensor que discrepa del
 mapa, lo destapó) y hallazgo de regresión: fr1_desk --fast tiene varianza
 2.6↔400 cm entre corridas (el 2.5 de lección 38 era UNA muestra; ancla
---fast = fr2_xyz, en paridad 1.5/1.4). Siguiente: hito 3b — cablear
-tracker/driver (--imu en examples/06, g_map desde init estática,
-T_cam_imu de EuRoC) y medir V1_01. Plan completo en docs/05 §7.
+--fast = fr2_xyz, en paridad 1.5/1.4). HITO 3b HECHO — primer VIO del
+repo corriendo: `tracker.enable_imu` (el DRIVER es dueño del reloj:
+segment_provider entre frame-ids; cadena desde imu_chain_tail del
+backend), `_reset_map` hereda sesgo/velocidad, `EuRoCStereoRig.T_cam_imu`
+(¡con la R1 de rectificación!), examples/06 con `--fast` (deuda v0.6
+saldada, y `--ba` como en 05) e `--imu`. MEDIDO con n=4 + experimento
+discriminador (lecciones 49-50): --fast en EuRoC varía 7↔153 cm (mediana
+~83) y el culpable es el WORKER ASYNC (KF tarde → mapa viejo en vuelo
+rápido; deuda §8); el pipeline SÍNCRONO es determinista AL BIT y queda
+**isam2-sync 4.6 cm (mejor que NumPy 6.9) / VIO-sync 5.4, escala 1.005 —
+PARIDAD: hito 3 CERRADO** (V1_01; el IMU además: perdidos −60% y online
+2× mejor bajo async). v1.1 mide su criterio en modo síncrono. Siguiente:
+hito 4 — prior IMU en el matching guiado (la palanca para V1_02/V1_03 y
+de paso el compensador natural del mapa viejo del async). Plan en §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 

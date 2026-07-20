@@ -407,6 +407,13 @@ class EuRoCStereoRig:
             camL.K, camL.dist, R1, P1, size, cv2.CV_32FC1)
         self.map_right = cv2.initUndistortRectifyMap(
             camR.K, camR.dist, R2, P2, size, cv2.CV_32FC1)
+        # Extrínseco para el VIO (v1.1): pose del IMU (= cuerpo B en EuRoC,
+        # imu0 tiene T_BS = I) en la cámara IZQUIERDA RECTIFICADA — que es el
+        # frame REAL del tracker. La rectificación ROTA cam0 por R1:
+        # T_camrect_body = [R1|0] · T_cam0_body = [R1|0] · inv(T_B_cam0).
+        R1_h = np.eye(4)
+        R1_h[:3, :3] = R1
+        self.T_cam_imu = R1_h @ invert_se3(_euroc_T_BS(root, left))
 
     def rectify(self, gray_left: np.ndarray, gray_right: np.ndarray
                 ) -> Tuple[np.ndarray, np.ndarray]:

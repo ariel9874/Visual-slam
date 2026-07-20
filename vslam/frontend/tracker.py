@@ -245,6 +245,9 @@ class PnPTracker(TrackerBase):
             self._ba = gtsam_bundle_adjustment   # GBA offline: batch
         else:
             self._ba = local_bundle_adjustment
+        # Modo VISUAL-INERCIAL (v1.1, requiere isam2): ver enable_imu.
+        self._imu_provider = None
+        self._imu_setup: Optional[dict] = None
         self._kf_ids: list = []          # keyframes en orden de inserción
         self._kf_db: list = []           # historial para reconocimiento de lugar
         self._metric = False             # mapa en METROS (init RGB-D, v0.6)
@@ -972,6 +975,35 @@ class PnPTracker(TrackerBase):
             self._map_queue.put(None)
             self._map_thread.join(timeout=30.0)
 
+    def enable_imu(self, noise, gravity_map: np.ndarray,
+                   T_cam_imu: Optional[np.ndarray] = None,
+                   init_gyro_bias: Optional[np.ndarray] = None,
+                   init_accel_bias: Optional[np.ndarray] = None,
+                   init_velocity: Optional[np.ndarray] = None,
+                   segment_provider=None) -> None:
+        """Activa el modo VISUAL-INERCIAL (v1.1; requiere ba_backend='isam2' —
+        el grafo VI vive SOLO en la gemela GTSAM, docs/05 §7).
+
+        El tracker NO conoce el tiempo (Frame.timestamp = 0.0 es deuda
+        consciente de §8): el DRIVER es el dueño del reloj y entrega
+        `segment_provider(kf_a, kf_b) -> (ts, gyro, accel)` — el segmento IMU
+        crudo entre esos dos frame-ids (los kf_id del tracker SON índices de
+        frame del driver). El backend preintegra con el sesgo VIGENTE y añade
+        el CombinedImuFactor (gtsam_isam2, decisión 6). `gravity_map` es g en
+        el frame del MAPA (anclado en la primera cámara; en estéreo, la
+        izquierda RECTIFICADA); sesgos/velocidad iniciales, de la init
+        estática (imu_init.py, lección 48).
+        """
+        if self._isam2 is None:
+            raise ValueError("enable_imu requiere ba_backend='isam2'")
+        self._imu_setup = dict(noise=noise, gravity_map=gravity_map,
+                               T_cam_imu=T_cam_imu)
+        self._imu_provider = segment_provider
+        self._isam2.configure_imu(noise, gravity_map, T_cam_imu=T_cam_imu,
+                                  init_gyro_bias=init_gyro_bias,
+                                  init_accel_bias=init_accel_bias,
+                                  init_velocity=init_velocity)
+
     def _run_local_ba(self, sync: bool = True) -> None:
         """Bundle adjustment sobre la ventana de keyframes recientes.
 
@@ -1004,9 +1036,20 @@ class PnPTracker(TrackerBase):
                     if start < len(entries):
                         new_obs.extend((kf, pid, uv) for pid, uv in entries[start:])
                         self._isam2_cursor[kf] = len(entries)
+                imu_data = None
+                if self._imu_provider is not None:
+                    # La cadena IMU sigue desde el último eslabón DEL BACKEND
+                    # (no desde _kf_ids[-2]): si dos KFs coalescen en el
+                    # worker, el segmento cubre ambos y el tiempo queda
+                    # particionado sin huecos ni solapes.
+                    tail = self._isam2.imu_chain_tail
+                    cur = window[-1]
+                    if tail is not None and tail != cur:
+                        imu_data = self._imu_provider(tail, cur)
                 result = self._isam2.process_keyframe(
                     self.mapper, window, new_obs,
-                    stereo_bf=self.STEREO_BF if self._metric else 0.0)
+                    stereo_bf=self.STEREO_BF if self._metric else 0.0,
+                    imu_data=imu_data)
             if result is None:
                 return          # update fallido: seguir con la pose del PnP
             opt_poses, opt_points = result
@@ -1322,8 +1365,21 @@ class PnPTracker(TrackerBase):
             self.mapper = type(self.mapper)()
             if self._isam2 is not None:
                 from vslam.backend.gtsam_isam2 import ISAM2LocalBA
+                old_isam2 = self._isam2
                 self._isam2 = ISAM2LocalBA(self.camera)
                 self._isam2_cursor = {}
+                if self._imu_setup is not None:
+                    # El sesgo y la velocidad son FÍSICOS, no gauge: la sesión
+                    # nueva hereda los últimos estimados como prior de anclaje
+                    # (la gravedad del mapa no cambia: el reset ancla la sesión
+                    # en la pose extrapolada del MISMO mundo, v0.9).
+                    bg, ba = old_isam2.last_bias
+                    self._isam2.configure_imu(
+                        self._imu_setup["noise"],
+                        self._imu_setup["gravity_map"],
+                        T_cam_imu=self._imu_setup["T_cam_imu"],
+                        init_gyro_bias=bg, init_accel_bias=ba,
+                        init_velocity=old_isam2.last_velocity)
             self._bow = BagOfVisualWords(self.BOW_WORDS)
             self._kf_ids, self._kf_db = [], []
             self._kf = None
