@@ -74,9 +74,25 @@ discriminador (lecciones 49-50): --fast en EuRoC varía 7↔153 cm (mediana
 rápido; deuda §8); el pipeline SÍNCRONO es determinista AL BIT y queda
 **isam2-sync 4.6 cm (mejor que NumPy 6.9) / VIO-sync 5.4, escala 1.005 —
 PARIDAD: hito 3 CERRADO** (V1_01; el IMU además: perdidos −60% y online
-2× mejor bajo async). v1.1 mide su criterio en modo síncrono. Siguiente:
-hito 4 — prior IMU en el matching guiado (la palanca para V1_02/V1_03 y
-de paso el compensador natural del mapa viejo del async). Plan en §7.
+2× mejor bajo async). v1.1 mide su criterio en modo síncrono. HITO 4
+HECHO (lección 51): prior IMU en el frontend — `_imu_advance`/`_imu_anchor`
+en tracker.py sustituyen la velocidad constante (prior del guiado + coast
+dead-reckoning) por la preintegración del gap con el sesgo vigente del
+grafo; la visión re-ancla (R,p), el grafo refresca (v,sesgos) por KF.
+tests/test_imu_frontend.py (4). **ÉXITO en V1_01: 5.0 cm, escala 1.005,
+perdidos 105→28** (mejor que 6.9 sin IMU y 5.4 del hito 3). HITO 5
+DESCARTADO (lección 51): "coast IMU sin reset" (LOST_RESET_AFTER 90→400
+con IMU) MEDIDO 4× PEOR (V1_02 1584 perdidos, escala 0.006 — el
+dead-reckoning no puentea apagones largos, coast eterno); REVERTIDO.
+**RESULTADO CLAVE de v1.1: el IMU cierra el sobre en movimiento
+suave-agresivo (V1_01) pero V1_02/V1_03 NO se rescatan — es un límite de
+FRONTEND (blur del dron rompe ORB: perdidos IDÉNTICOS con/sin prior IMU),
+no de backend inercial. El grafo IMU + reset colapsa la escala ACTIVAMENTE
+(0.11 vs 0.89 del control sin IMU; 2 fallos de update).** Discriminadores
+en lección 51. DECISIÓN DE RUMBO pendiente de Ariel (§7): (A) atacar el
+frontend bajo blur — LightGlue/deblur, la única palanca medida para
+V1_02/V1_03; (B) cerrar v1.1 con el VIO validado en V1_01 + este límite
+documentado. Plan en §7.
 
 ## v1.0 COMMITEADA — pendiente de publicación (pasos manuales)
 

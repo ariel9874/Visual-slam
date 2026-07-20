@@ -1008,6 +1008,58 @@ Flujo por frame: extraer → (INIT: buffer + E con MAGSAC + recoverPose con
     (lección 25). El frente async (prioridad de cola, o el prior IMU del
     hito 4 que compensa el mapa viejo exactamente) va a deuda §8.
 
+51. **El IMU cierra el sobre en V1_01 pero NO rescata V1_02/V1_03 — el
+    cuello es el FRONTEND bajo blur, no el backend inercial** (v1.1 hitos
+    4-5, dos resultados negativos que redefinen el criterio de v1.1).
+    HITO 4 (prior IMU en el matching guiado + dead-reckoning en el coast,
+    en vez de velocidad constante): el estado del cuerpo (R,v,p) vive en el
+    frontend, se preintegra el gap entre frames con el sesgo VIGENTE del
+    grafo, y la visión re-ancla (R,p) en cada pose aceptada / el grafo
+    refresca (v,sesgos) en cada KF. **ÉXITO rotundo en V1_01: 5.0 cm,
+    escala 1.005, perdidos 105→28** (mejor que 6.9 sin IMU y que el 5.4 del
+    VIO-sync del hito 3) — el prior IMU engancha exactamente los frames que
+    la velocidad constante perdía en las curvas. En sintético (vuelo
+    agresivo) el prior de velocidad constante yerra 1.1 cm / 0.56° por
+    frame (~5 px, se come la ventana de 15 px del guiado) y el prior IMU
+    queda en precisión de máquina (test_imu_frontend, 4 tests). PERO en
+    **V1_02/V1_03 el objetivo (< 10 cm, escala≈1, sin colapso) NO se
+    alcanza, y el grafo IMU las EMPEORA**. Los 5 discriminadores en V1_02
+    (todos síncronos), leídos juntos:
+    | config | final-KF | escala | perdidos | resets | fallos |
+    |---|---|---|---|---|---|
+    | control iSAM2 sin IMU (mejor corrida) | **72.8** | **0.889** | 381 | 3 | 0 |
+    | control iSAM2 sin IMU (otra corrida) | 142.0 | 0.633 | 486 | 3 | 0 |
+    | grafo IMU + prior CV (ablación h3b) | 1108.5 | 0.039 | 662 | — | — |
+    | grafo IMU + prior IMU (hito 4) | 539.9 | 0.112 | 487 | 4 | 2 |
+    | grafo IMU + prior IMU, SIN reset (hito 5) | 20166 | 0.006 | 1584 | 3 | 0 |
+    Cuatro verdades medidas: (a) **el culpable NO es mi prior del frontend
+    — es el GRAFO IMU bajo resets**: mi prior MITIGA (539 < 1108 de la
+    ablación con prior CV; perdidos 487 < 662), pero los perdidos son
+    IDÉNTICOS con y sin prior (487 vs 486) → en V1_02 los frames no se
+    pierden por mal prior de movimiento, se pierden porque el matching muere
+    bajo blur y ahí NINGÚN prior inventa correspondencias. (b) **El grafo
+    IMU colapsa la escala ACTIVAMENTE**: el control llega a 0.889 sin IMU y
+    el CombinedImuFactor la hunde a 0.112 — la firma son los 2 fallos de
+    update (sistemas indeterminados) que el control (0 fallos) no tiene: en
+    cada reset el grafo VI hereda velocidad/sesgo del tramo ciego y se
+    re-configura mal condicionado. (c) HITO 5 ("coast IMU sin reset": subir
+    LOST_RESET_AFTER a 400 con IMU, que el dead-reckoning puentee y la reloc
+    re-enganche el MISMO mapa) **FALLA 4×**: el dead-reckoning solo puentea
+    apagones CORTOS (a 1 s deriva 4.4 cm, lección 47; a 20 s deriva
+    cuadrática de metros), el dron se DESPLAZA durante el blur, el mapa deja
+    de ser visible y el sistema queda en coast eterno (1584 perdidos, 8
+    KFs). El reset es un mal MENOR — REVERTIDO. (d) De paso: **el iSAM2
+    síncrono NO es bit-determinista en secuencias DIFÍCILES** (control V1_02
+    142/486 vs 72.8/381 entre corridas) — casi seguro el RANSAC del PnP sin
+    semilla, invisible en V1_01 (lección 50) porque ahí el tracking es tan
+    sano que converge al mismo inlier-set; deuda §8. **VEREDICTO: el IMU
+    cierra el sobre en movimiento suave-agresivo (V1_01) pero el blur severo
+    de V1_02/V1_03 es un problema de FRONTEND** (ORB no detecta features
+    estables) — la palanca es LightGlue/deblur/máscara de blur, no más
+    backend inercial. El criterio de v1.1 se redefine: VIO validado y en
+    paridad-o-mejor donde el frontend vive; V1_02/V1_03 quedan como límite
+    MEDIDO del enfoque disperso (§7).
+
 ---
 
 ## 6. v0.4b — CERRADA (plan original abajo, como referencia de lo hecho)
@@ -1383,11 +1435,31 @@ Resumen operativo de lo inmediato:
     5.4 cm, escala 1.005 — PARIDAD: hito 3 CERRADO**. El frente async va
     a deuda §8; el hito 4 (prior IMU en el frontend) es además su
     compensador natural.
-  - ⏳ HITO 4 — predicción IMU en el frontend: el prior del matching guiado
-    (hoy velocidad constante, lección 24) desde la preintegración del gap
-    entre frames — la palanca directa contra rotación rápida/blur, medible
-    como inliers del guiado y frames perdidos en V1_02/V1_03.
-  - ⏳ HITO 5 — CRITERIO de v1.1. BASELINE MEDIDO (jul 2026, examples/06
+  - ✅ HITO 4 HECHO (lección 51) — predicción IMU en el frontend:
+    `_imu_advance`/`_imu_anchor` en tracker.py sustituyen la velocidad
+    constante (lección 24) por la preintegración del gap con el sesgo
+    vigente del grafo, en el prior del matching guiado Y en el coast
+    (dead-reckoning). `enable_imu` cablea la clase; el estado (R,p) lo re-ancla
+    la visión en cada pose aceptada, (v,sesgos) los refresca el grafo por KF;
+    bucle/reloc/reset rotan o re-siembran el estado. test_imu_frontend (4).
+    **ÉXITO en V1_01: 5.0 cm, escala 1.005, perdidos 105→28** (mejor que
+    6.9 sin IMU y 5.4 del hito 3). NO rescata V1_02/V1_03: el cuello es el
+    frontend bajo blur, no el prior (perdidos idénticos con/sin prior IMU).
+  - ❌ HITO 5 DESCARTADO (lección 51) — "coast IMU sin reset"
+    (LOST_RESET_AFTER 90→400 con IMU, que el dead-reckoning puentee el
+    apagón y la reloc re-enganche el MISMO mapa). MEDIDO 4× PEOR en V1_02
+    (1584 perdidos vs 487, escala 0.006): el dead-reckoning no puentea
+    apagones largos (deriva cuadrática; el dron se va y el mapa deja de ser
+    visible) → coast eterno. El reset es un mal MENOR. REVERTIDO.
+  - ⚠️ CRITERIO de v1.1 REDEFINIDO (lección 51): el IMU cierra el sobre en
+    movimiento suave-agresivo (**V1_01 VIO 5.0 cm, paridad-o-mejor**) pero
+    V1_02/V1_03 son un límite de FRONTEND, no de backend inercial — ORB no
+    detecta features estables bajo el blur del dron (perdidos idénticos con
+    y sin prior IMU). Rescatarlas exige LightGlue/deblur/máscara de blur en
+    el frontend, NO más IMU. DECISIÓN de rumbo pendiente de Ariel: (A)
+    atacar el frontend bajo blur (la única palanca medida para V1_02/V1_03);
+    (B) cerrar v1.1 con el VIO validado en V1_01 + este límite documentado.
+    BASELINE MEDIDO (jul 2026, examples/06
     --stereo, ATE final-KF métrico; V1_02/V1_03 bajadas del mirror GlowBond
     en HF — vicon_room1.zip trae bag+zip ASL por secuencia; el host ETH
     sigue caído):
@@ -1427,10 +1499,8 @@ Resumen operativo de lo inmediato:
 | fr1_desk `--fast` tiene varianza 2.6↔400 cm entre corridas | Descubierto en el A/B de la lección 49 (n=5; iSAM2+hilo async no determinista sobre la secuencia biestable). El "2.5" de lección 38 era una muestra. Ancla de regresión --fast: fr2_xyz (estable). Investigar (semillas/iteraciones) fuera del camino crítico de v1.1 |
 | El worker ASYNC colapsa en EuRoC (dron rápido) | Lección 50: --fast mediana ~83 cm en V1_01 (síncrono: 4.6 determinista al bit). El KF procesado tarde deja mapa viejo en vuelo rápido. Curas candidatas: prior IMU del hito 4 (compensa el mapa viejo), prioridad/presupuesto de cola. v1.1 mide su criterio en modo SÍNCRONO mientras tanto |
 | ~~Licencia sin decidir~~ SALDADA (v0.9) | MIT (decisión de Ariel); deps permisivas (GTSAM es BSD-3) |
-
----
-
-## 9. Checklist de arranque para la próxima sesión
+| iSAM2 síncrono NO es bit-determinista en secuencias DIFÍCILES | Lección 51: control V1_02 sin IMU dio 142/486 y 72.8/381 entre corridas (V1_01 sí es bit-idéntico, lección 50). Sospechoso: el RANSAC de `cv2.solvePnPRansac` sin semilla — invisible cuando el tracking es sano (mismo inlier-set), aflora al límite. Fijar semilla del RANSAC para recuperar el determinismo como herramienta de regresión también en EuRoC |
+| V1_02/V1_03 colapsan: es FRONTEND, no backend | Lección 51: el IMU (hito 4) rescata V1_01 pero NO estas — el blur del dron rompe el matching ORB (perdidos idénticos con/sin prior IMU); el grafo IMU + reset colapsa la escala (0.11 vs 0.89). Palanca MEDIDA: LightGlue/deblur/máscara de blur en el frontend. Decisión de rumbo de Ariel (§7) |
 
 1. Leer este documento completo y el README.
 2. `git status` — verificar si ya hubo commits (si no: recordar ofrecerlo).

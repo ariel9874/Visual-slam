@@ -137,6 +137,12 @@ class PnPTracker(TrackerBase):
     #                             extrapola y la reloc reintenta cada frame;
     #                             si en ~3-6 s nada engancha, seguir arrastrando
     #                             un mapa muerto solo acumula deriva ciega.
+    #                             VIO (v1.1): se probó subirlo a 400 con IMU
+    #                             ("coast sin reset", hito 5) — el dead-reckoning
+    #                             no puentea apagones LARGOS (deriva cuadrática:
+    #                             el dron se va, el mapa deja de ser visible) →
+    #                             coast eterno, 1584 perdidos vs 487, escala
+    #                             0.006. El reset es un mal MENOR. Lección 51.
     RELOC_MIN_MATCHES = 150     # más laxo que LOOP: aquí no hay bucle sin sentido
     RELOC_MIN_INLIERS = 40      # inliers PnP para aceptar la relocalización
     GATE_MIN_SAMPLES = 20       # historial mínimo antes de activar la compuerta
@@ -248,6 +254,11 @@ class PnPTracker(TrackerBase):
         # Modo VISUAL-INERCIAL (v1.1, requiere isam2): ver enable_imu.
         self._imu_provider = None
         self._imu_setup: Optional[dict] = None
+        self._imu_pred: Optional[dict] = None   # estado (R_wb, v, p) del frontend
+        self._imu_T_pred: Optional[np.ndarray] = None  # pose predicha del frame
+        self._imu_T_ci = np.eye(4)              # T_cam_imu vigente (I si no hay)
+        self._imu_synced_tail: Optional[int] = None  # eslabón del último refresco
+        self._ImuPreint = None                  # clase (import perezoso, enable_imu)
         self._kf_ids: list = []          # keyframes en orden de inserción
         self._kf_db: list = []           # historial para reconocimiento de lugar
         self._metric = False             # mapa en METROS (init RGB-D, v0.6)
@@ -325,6 +336,14 @@ class PnPTracker(TrackerBase):
             self.T_w_c = delta @ self.T_w_c
             self._T_prev = delta @ self._T_prev
             self._T_rel = np.eye(4)
+            if self._imu_pred is not None:
+                # El delta corrigió NUESTRA estimación dentro del mismo mapa
+                # (rígido): llevar el estado IMU al marco corregido — v vive
+                # en el frame del mapa, así que también rota.
+                dR, dt_ = delta[:3, :3], delta[:3, 3]
+                self._imu_pred["R"] = dR @ self._imu_pred["R"]
+                self._imu_pred["p"] = dR @ self._imu_pred["p"] + dt_
+                self._imu_pred["v"] = dR @ self._imu_pred["v"]
         kps, desc = self.extractor.detect_and_compute(gray)
         info = {"n_kps": len(kps), "n_matches": 0, "n_inliers": 0,
                 "tracked": False, "state": "", "n_map": len(self.mapper),
@@ -662,6 +681,7 @@ class PnPTracker(TrackerBase):
 
     def _track_step(self, gray, kps, desc, info) -> None:
         info["state"] = "TRACK"
+        self._imu_T_pred = self._imu_advance()   # prior IMU del frame (hito 4)
         # Mapa global (v0.2) o LOCAL por recencia+covisibilidad (v0.4). El lock
         # evita leer el mapa a medio corregir por el worker de mapeo (async).
         with self._map_lock:
@@ -673,7 +693,9 @@ class PnPTracker(TrackerBase):
         # 22) — la palanca contra la inanición de KFs y la deriva.
         matches = []
         if len(map_pts):
-            T_pred = self._T_prev @ self._T_rel
+            # Prior IMU (hito 4) si lo hay; si no, velocidad constante (v0.45).
+            T_pred = (self._imu_T_pred if self._imu_T_pred is not None
+                      else self._T_prev @ self._T_rel)
             matches = self._guided_match(kps, desc, T_pred, map_pts, map_desc)
         info["guided"] = len(matches)
         if len(matches) < self.MIN_MAP_MATCHES:
@@ -718,6 +740,7 @@ class PnPTracker(TrackerBase):
         self._T_rel = invert_se3(self._T_prev) @ T_w_c
         self._T_prev = T_w_c.copy()
         self.T_w_c = T_w_c
+        self._imu_anchor(T_w_c)          # la visión manda en (R, p) (hito 4)
         self._coast_count = 0
         self._step_history.append(step)
         self._step_history = self._step_history[-self.GATE_HISTORY:]
@@ -999,10 +1022,88 @@ class PnPTracker(TrackerBase):
         self._imu_setup = dict(noise=noise, gravity_map=gravity_map,
                                T_cam_imu=T_cam_imu)
         self._imu_provider = segment_provider
+        from vslam.backend.imu_preintegration import ImuPreintegration
+        self._ImuPreint = ImuPreintegration
+        self._imu_T_ci = (np.eye(4) if T_cam_imu is None
+                          else np.asarray(T_cam_imu, dtype=np.float64))
+        self._imu_pred = None            # el prior del frontend ancla perezoso
+        self._imu_synced_tail = None
         self._isam2.configure_imu(noise, gravity_map, T_cam_imu=T_cam_imu,
                                   init_gyro_bias=init_gyro_bias,
                                   init_accel_bias=init_accel_bias,
                                   init_velocity=init_velocity)
+
+    def _imu_anchor(self, T_w_c: np.ndarray) -> None:
+        """Re-ancla el estado IMU del frontend en una pose ACEPTADA de la
+        visión (R, p). La velocidad y los sesgos se refrescan del grafo solo
+        cuando este procesó un eslabón NUEVO de la cadena — en modo síncrono
+        eso ocurre EN el keyframe, así que la velocidad refrescada es
+        exactamente la del frame actual (tras un reset de época el tail es
+        None y NO se refresca: _vel_last podría ser viejo)."""
+        if self._imu_pred is None:
+            return
+        T_wb = T_w_c @ self._imu_T_ci
+        self._imu_pred["R"] = T_wb[:3, :3].copy()
+        self._imu_pred["p"] = T_wb[:3, 3].copy()
+        tail = self._isam2.imu_chain_tail
+        if tail is not None and tail != self._imu_synced_tail:
+            self._imu_pred["v"] = self._isam2.last_velocity
+            self._imu_synced_tail = tail
+
+    def _imu_advance(self) -> Optional[np.ndarray]:
+        """Prior IMU del matching guiado (v1.1 hito 4): propaga el estado del
+        cuerpo por el gap entre frames y devuelve la pose de cámara predicha
+        (None sin IMU o sin segmento → el llamador cae a velocidad constante).
+
+        ─── La matemática: el prior deja de asumir velocidad constante ───
+        El modelo constante (lección 24) extrapola el último T_rel: falla
+        exactamente cuando hay ACELERACIÓN — angular o lineal, el vuelo de
+        V1_02/V1_03 — y ahí el punto proyectado se sale de la ventana de ~15 px
+        del guiado. El IMU mide esa aceleración a 200 Hz. Con el estado del
+        CUERPO en el frame del mapa (R_wb, v, p) y el gap preintegrado
+        (ΔR, Δv, Δp — Forster, imu_preintegration.py — con el sesgo VIGENTE
+        del grafo), la recomposición estándar:
+
+            R ← R·ΔR    v ← v + g·Δt + R·Δv    p ← p + v·Δt + ½·g·Δt² + R·Δp
+
+        y la cámara predicha es T_pred = T_wb · T_cam_imu⁻¹. La visión RE-ANCLA
+        (R, p) en cada pose aceptada y el grafo refresca (v, sesgos) en cada
+        keyframe: el IMU solo puentea ~50 ms — a 1 s ENTERO su deriva medida es
+        4.4 cm mediana (lección 47). En coast el mismo estado sigue integrando:
+        dead-reckoning puro, en vez de extrapolar un T_rel congelado durante
+        todo el apagón.
+        """
+        if self._imu_provider is None:
+            return None
+        if self._imu_pred is None:
+            # Anclaje perezoso: pose del último frame aceptado + velocidad del
+            # backend (antes del primer KF, la de la init estática).
+            T_wb = self._T_prev @ self._imu_T_ci
+            self._imu_pred = {"R": T_wb[:3, :3].copy(),
+                              "p": T_wb[:3, 3].copy(),
+                              "v": self._isam2.last_velocity}
+            self._imu_synced_tail = self._isam2.imu_chain_tail
+        try:
+            ts, gyro, accel = self._imu_provider(self._frame_idx - 1,
+                                                 self._frame_idx)
+        except (KeyError, IndexError):
+            return None                  # el driver no registró esos frames
+        n = min(len(gyro), len(accel), len(ts) - 1)
+        if n <= 0:
+            return None
+        bg, ba = self._isam2.last_bias
+        pim = self._ImuPreint(self._imu_setup["noise"],
+                              gyro_bias=bg, accel_bias=ba)
+        for k in range(n):
+            dt = float(ts[k + 1] - ts[k])
+            if dt > 0.0:
+                pim.integrate(gyro[k], accel[k], dt)
+        st = self._imu_pred
+        st["R"], st["v"], st["p"] = pim.predict(
+            st["R"], st["v"], st["p"], gravity=self._imu_setup["gravity_map"])
+        T_wb = np.eye(4)
+        T_wb[:3, :3], T_wb[:3, 3] = st["R"], st["p"]
+        return T_wb @ invert_se3(self._imu_T_ci)
 
     def _run_local_ba(self, sync: bool = True) -> None:
         """Bundle adjustment sobre la ventana de keyframes recientes.
@@ -1083,6 +1184,10 @@ class PnPTracker(TrackerBase):
             self.T_w_c = opt_poses[cur].copy()
             self._T_prev = self.T_w_c.copy()
             self._kf["T"] = self.T_w_c.copy()
+            # (hito 4) Re-anclar en la pose refinada; el grafo acaba de
+            # procesar este KF → el anclaje refresca v/sesgos EXACTOS del
+            # frame actual (ver _imu_anchor).
+            self._imu_anchor(self.T_w_c)
 
     def _match_against_kf(self, old, gray, kps, desc):
         """Empareja el frame actual contra un keyframe de la base y lo verifica
@@ -1312,6 +1417,14 @@ class PnPTracker(TrackerBase):
             self.T_w_c = T_new
             self._T_prev = self.T_w_c.copy()
             self._kf["T"] = self.T_w_c.copy()
+            # Estado IMU al marco corregido: (R, p) desde la pose nueva; la
+            # velocidad rota con el delta (mismo argumento que en el camino
+            # async de process_frame). Anclar ANTES de rotar v: el anclaje
+            # puede refrescarla del grafo, que aún vive PRE-corrección.
+            self._imu_anchor(T_new)
+            if self._imu_pred is not None:
+                delta_R = (T_new @ invert_se3(T_old))[:3, :3]
+                self._imu_pred["v"] = delta_R @ self._imu_pred["v"]
         if self._isam2 is not None:
             # La corrección Sim(3) reescribió poses y puntos FUERA de iSAM2:
             # su linealización quedó obsoleta → época nueva (ver gtsam_isam2).
@@ -1336,14 +1449,23 @@ class PnPTracker(TrackerBase):
         if self._coast_count >= self.RELOC_AFTER \
                 and self._relocalize(gray, kps, desc, info):
             return
-        # Velocidad constante (como examples/01): extrapola el último movimiento.
-        self.T_w_c = self.T_w_c @ self._T_rel
+        # Con IMU (hito 4): dead-reckoning del gap — el estado ya se propagó en
+        # _imu_advance y a este plazo deriva milímetros (lección 47). Sin IMU,
+        # velocidad constante (como examples/01): extrapola el último movimiento
+        # (un T_rel CONGELADO durante todo el apagón).
+        if self._imu_T_pred is not None:
+            self.T_w_c = self._imu_T_pred.copy()
+        else:
+            self.T_w_c = self.T_w_c @ self._T_rel
         self._T_prev = self.T_w_c.copy()
         if not info["state"].startswith("GATE"):
             info["state"] = "COAST"
         # Degradación elegante (v0.9): si tras LOST_RESET_AFTER frames ni la
         # reloc ni el coast enganchan, el mapa es IRRECUPERABLE — se archiva y
-        # se arranca una sesión nueva anclada en la pose extrapolada.
+        # se arranca una sesión nueva anclada en la pose extrapolada. (Con IMU
+        # el reset colapsa la escala del grafo — lección 51 — pero NO resetear
+        # es peor: coast eterno. El cuello real es el frontend bajo blur, no el
+        # backend inercial; deuda §8.)
         if self._coast_count >= self.LOST_RESET_AFTER:
             self._reset_map()
             info["state"] = "RESET"
@@ -1380,6 +1502,11 @@ class PnPTracker(TrackerBase):
                         T_cam_imu=self._imu_setup["T_cam_imu"],
                         init_gyro_bias=bg, init_accel_bias=ba,
                         init_velocity=old_isam2.last_velocity)
+                    # El prior del frontend re-ancla perezoso en la sesión
+                    # nueva (v heredada vía el init_velocity de arriba).
+                    self._imu_pred = None
+                    self._imu_T_pred = None
+                    self._imu_synced_tail = None
             self._bow = BagOfVisualWords(self.BOW_WORDS)
             self._kf_ids, self._kf_db = [], []
             self._kf = None
@@ -1433,6 +1560,10 @@ class PnPTracker(TrackerBase):
         self.T_w_c = T_pnp
         self._T_prev = T_pnp.copy()
         self._T_rel = np.eye(4)
+        # El estado IMU se re-ancla en la pose de la reloc; v conserva el
+        # dead-reckoning (la física fue continua aunque la estimación saltara —
+        # tras un apagón largo ambas opciones son inciertas; esta es local).
+        self._imu_anchor(T_pnp)
         self._coast_count = 0
         self._local_ref_kf = old_id      # re-ancla el mapa local aquí (ver _local_kfs)
         self.reloc_events.append((self._frame_idx, old_id))

@@ -150,8 +150,12 @@ def main() -> int:
         if "LOOP" in info["state"]:
             print(f"    frame {i}: BUCLE cerrado vs KF {tracker.loop_events[-1][1]}")
     est_ts = np.array(est_ts); est_pos = np.array(est_pos)
-    print(f"    perdidos {lost} | bucles {len(tracker.loop_events)} | "
-          f"relocs {len(tracker.reloc_events)}")
+    diag = (f"    perdidos {lost} | bucles {len(tracker.loop_events)} | "
+            f"relocs {len(tracker.reloc_events)} | "
+            f"resets {len(tracker.reset_events)}")
+    if tracker._isam2 is not None:
+        diag += f" | fallos update {tracker._isam2.n_failures}"
+    print(diag)
 
     # ESTÉREO = mapa MÉTRICO → ATE rígido (sin regalar escala); la escala de
     # similitud es el chequeo. MONOCULAR = escala gauge → alinear con similitud.
